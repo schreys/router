@@ -727,8 +727,11 @@ function setDrawing(on) {
   on ? map.doubleClickZoom.disable() : map.doubleClickZoom.enable();
 }
 
-$('drawToggle').addEventListener('click', () => setDrawing(!drawing));
-map.on('click', (e) => { if (drawing) addWaypoint(e.latlng); });
+$('drawToggle').addEventListener('click', () => { if (!drawing) cancelSplit(); setDrawing(!drawing); });
+map.on('click', (e) => {
+  if (splitting) return splitTrack(splitting.t, e.latlng);
+  if (drawing) addWaypoint(e.latlng);
+});
 
 $('undo').addEventListener('click', undo);
 function undo() {
@@ -741,7 +744,7 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     undo();
   }
-  if (e.key === 'Escape') setDrawing(false);
+  if (e.key === 'Escape') { setDrawing(false); cancelSplit(); }
 });
 
 $('reverse').addEventListener('click', () => {
@@ -774,19 +777,20 @@ $('routeName').addEventListener('input', saveRoute);
 $('export').addEventListener('click', () => {
   const coords = routeCoords();
   if (coords.length < 2) return toast('Teken eerst een route');
-  downloadGpx($('routeName').value || 'route', coords);
+  downloadGpx($('routeName').value || 'route', [coords]);
 });
 
-function downloadGpx(name, coords) {
-  const pts = coords.map((c) => `      <trkpt lat="${c[0].toFixed(6)}" lon="${c[1].toFixed(6)}">${c[2] != null ? `<ele>${(+c[2]).toFixed(1)}</ele>` : ''}</trkpt>`).join('\n');
+// lines: one or more track segments [[lat, lng, ele?], ...]; wpts: [{ p: [lat, lng, ele?], name }].
+function downloadGpx(name, lines, wpts = []) {
+  const pt = (tag, c, indent, inner = '') => `${indent}<${tag} lat="${c[0].toFixed(6)}" lon="${c[1].toFixed(6)}">${c[2] != null && !isNaN(c[2]) ? `<ele>${(+c[2]).toFixed(1)}</ele>` : ''}${inner}</${tag}>`;
+  const wptXml = wpts.map((w) => pt('wpt', w.p, '  ', w.name ? `<name>${escapeXml(w.name)}</name>` : '') + '\n').join('');
+  const segs = lines.map((l) => `    <trkseg>\n${l.map((c) => pt('trkpt', c, '      ')).join('\n')}\n    </trkseg>`).join('\n');
   const gpx = `<?xml version="1.0" encoding="UTF-8"?>
 <gpx version="1.1" creator="Fietsplanner" xmlns="http://www.topografix.com/GPX/1/1">
   <metadata><name>${escapeXml(name)}</name></metadata>
-  <trk>
+${wptXml}  <trk>
     <name>${escapeXml(name)}</name>
-    <trkseg>
-${pts}
-    </trkseg>
+${segs}
   </trk>
 </gpx>
 `;
@@ -826,20 +830,26 @@ function parseGpx(text, fileName) {
   return { name: nameEl?.textContent.trim() || fileName.replace(/\.gpx$/i, ''), lines: valid, wpts };
 }
 
-function addTrack(data) {
+function addTrack(data, index = tracks.length) {
   const color = TRACK_COLORS[trackSeq % TRACK_COLORS.length];
-  const t = { id: ++trackSeq, color, visible: true, ...data };
+  const t = { id: ++trackSeq, color, visible: true, pick: false, ...data };
   t.layer = L.featureGroup();
   t.lines.forEach((l) => L.polyline(l, { color, weight: 4, opacity: 0.85 })
-    .on('click', () => selectTrack(t.id)).addTo(t.layer));
+    .on('click', () => { if (!splitting) selectTrack(t.id); }).addTo(t.layer));
   t.wpts.forEach((w) => L.circleMarker(w.p, { radius: 5, color, fillOpacity: 1 })
     .bindTooltip(escapeHtml(w.name || 'Punt')).addTo(t.layer));
   t.layer.addTo(map);
   t.coords = t.lines.flat();
   t.stats = computeStats(t.coords);
-  tracks.push(t);
+  tracks.splice(index, 0, t);
   renderTrackList();
   return t;
+}
+
+function removeTrack(t) {
+  map.removeLayer(t.layer);
+  tracks.splice(tracks.indexOf(t), 1);
+  if (profileSource === t.id) profileSource = 'route';
 }
 
 async function loadFiles(files) {
@@ -857,15 +867,30 @@ async function loadFiles(files) {
 function renderTrackList() {
   $('trackList').innerHTML = tracks.map((t) => `
     <li data-id="${t.id}" style="--c:${t.color}" class="${profileSource === t.id ? 'selected' : ''}">
-      <div class="name" data-act="select">${escapeHtml(t.name)}</div>
+      <div class="head">
+        ${tracks.length > 1 && t.lines.length ? `<input type="checkbox" data-act="pick" title="Selecteer om samen te voegen" ${t.pick ? 'checked' : ''} />` : ''}
+        <div class="name" data-act="select">${escapeHtml(t.name)}</div>
+      </div>
       <div class="meta">${fmtKm(t.stats.dist)} · ↗ ${Math.round(t.stats.up)} m · ↘ ${Math.round(t.stats.down)} m</div>
       <div class="row wrap">
         <button class="small" data-act="toggle">${t.visible ? '🙈 Verberg' : '👁 Toon'}</button>
         <button class="small" data-act="edit" ${t.coords.length < 2 ? 'disabled' : ''}>✏️ Bewerk als route</button>
-        <button class="small" data-act="remove">🗑</button>
+        <button class="small${splitting?.t === t ? ' active' : ''}" data-act="split" ${t.coords.length < 3 ? 'disabled' : ''}>${splitting?.t === t ? '✂ Annuleer' : '✂ Splitsen'}</button>
+        <button class="small" data-act="download" title="Download als GPX">⬇ GPX</button>
+        <button class="small" data-act="remove" title="Verwijder">🗑</button>
       </div>
     </li>`).join('');
+
+  const picked = tracks.filter((t) => t.pick && t.lines.length);
+  $('trackActions').innerHTML = tracks.length > 1
+    ? `<button class="small" data-act="merge" ${picked.length < 2 ? 'disabled' : ''}>🔗 Voeg ${picked.length >= 2 ? picked.length + ' tracks' : 'tracks'} samen</button>
+       <span class="hint">${picked.length < 2 ? 'Vink 2 of meer tracks aan' : 'In de volgorde van de lijst'}</span>`
+    : '';
 }
+
+$('trackActions').addEventListener('click', (e) => {
+  if (e.target.closest('[data-act]')?.dataset.act === 'merge') mergeTracks(tracks.filter((t) => t.pick && t.lines.length));
+});
 
 $('trackList').addEventListener('click', (e) => {
   const act = e.target.closest('[data-act]')?.dataset.act;
@@ -873,20 +898,121 @@ $('trackList').addEventListener('click', (e) => {
   if (!act || !li) return;
   const t = tracks.find((x) => x.id === +li.dataset.id);
   if (act === 'select') selectTrack(t.id);
+  if (act === 'pick') { t.pick = e.target.checked; renderTrackList(); }
   if (act === 'toggle') {
     t.visible = !t.visible;
     t.visible ? t.layer.addTo(map) : map.removeLayer(t.layer);
     renderTrackList();
   }
   if (act === 'remove') {
-    map.removeLayer(t.layer);
-    tracks.splice(tracks.indexOf(t), 1);
-    if (profileSource === t.id) profileSource = 'route';
+    if (splitting?.t === t) cancelSplit();
+    removeTrack(t);
     renderTrackList();
     renderElevation();
   }
-  if (act === 'edit') trackToRoute(t);
+  if (act === 'edit') { if (splitting?.t === t) cancelSplit(); trackToRoute(t); }
+  if (act === 'split') splitting?.t === t ? cancelSplit() : startSplit(t);
+  if (act === 'download') downloadGpx(t.name, t.lines, t.wpts);
 });
+
+// ---------- Splitting and merging tracks ----------
+let splitting = null; // { t, marker }
+
+function nearestTrackPoint(t, latlng) {
+  const cos = Math.cos((latlng.lat * Math.PI) / 180);
+  let best = null;
+  t.lines.forEach((line, li) => line.forEach((p, pi) => {
+    const d = (p[0] - latlng.lat) ** 2 + ((p[1] - latlng.lng) * cos) ** 2;
+    if (!best || d < best.d) best = { d, li, pi };
+  }));
+  return best;
+}
+
+function startSplit(t) {
+  cancelSplit();
+  setDrawing(false);
+  if (!t.visible) { t.visible = true; t.layer.addTo(map); }
+  splitting = {
+    t,
+    marker: L.circleMarker([0, 0], { radius: 7, color: '#fff', weight: 2, fillColor: t.color, fillOpacity: 1, interactive: false }),
+  };
+  $('map').classList.add('splitting');
+  renderTrackList();
+  toast('Klik op de track waar je wilt splitsen (Esc om te annuleren)', 5000);
+}
+
+function cancelSplit() {
+  if (!splitting) return;
+  map.removeLayer(splitting.marker);
+  splitting = null;
+  $('map').classList.remove('splitting');
+  renderTrackList();
+}
+
+map.on('mousemove', (e) => {
+  if (!splitting) return;
+  const n = nearestTrackPoint(splitting.t, e.latlng);
+  splitting.marker.setLatLng(splitting.t.lines[n.li][n.pi]).addTo(map);
+});
+
+// Splits at a track point; the point itself ends the first part and starts the second.
+function splitTrack(t, latlng) {
+  const { li, pi } = nearestTrackPoint(t, latlng);
+  const first = [...t.lines.slice(0, li), t.lines[li].slice(0, pi + 1)].filter((l) => l.length > 1);
+  const second = [t.lines[li].slice(pi), ...t.lines.slice(li + 1)].filter((l) => l.length > 1);
+  if (!first.length || !second.length) return toast('Kies een punt verder van het begin of einde van de track');
+
+  const firstWpts = [];
+  const secondWpts = [];
+  t.wpts.forEach((w) => {
+    const n = nearestTrackPoint(t, L.latLng(w.p[0], w.p[1]));
+    (n.li < li || (n.li === li && n.pi <= pi) ? firstWpts : secondWpts).push(w);
+  });
+
+  cancelSplit();
+  const index = tracks.indexOf(t);
+  removeTrack(t);
+  addTrack({ name: `${t.name} (1)`, lines: first, wpts: firstWpts }, index);
+  addTrack({ name: `${t.name} (2)`, lines: second, wpts: secondWpts }, index + 1);
+  renderElevation();
+  toast('Track gesplitst in 2 delen');
+}
+
+// Joins tracks in the given order, reversing a track when that makes its ends connect better.
+// Segments whose ends are within 50 m are joined into one; larger gaps stay separate segments.
+function mergeTracks(list) {
+  if (list.length < 2) return;
+  const reversed = (lines) => lines.map((l) => [...l].reverse()).reverse();
+  const ends = (lines) => [lines[0][0], lines.at(-1).at(-1)];
+  let lines = [];
+  const wpts = [];
+  list.forEach((t, k) => {
+    let tl = t.lines.map((l) => [...l]);
+    const [start, end] = ends(tl);
+    if (k === 0) {
+      const [ns, ne] = ends(list[1].lines);
+      const fromStart = Math.min(haversine(start, ns), haversine(start, ne));
+      const fromEnd = Math.min(haversine(end, ns), haversine(end, ne));
+      if (fromStart < fromEnd) tl = reversed(tl);
+    } else {
+      const tail = lines.at(-1).at(-1);
+      if (haversine(tail, end) < haversine(tail, start)) tl = reversed(tl);
+      if (haversine(tail, tl[0][0]) < 50) {
+        lines[lines.length - 1] = lines.at(-1).concat(tl[0].slice(1));
+        tl = tl.slice(1);
+      }
+    }
+    lines = lines.concat(tl);
+    wpts.push(...t.wpts);
+  });
+
+  const index = tracks.indexOf(list[0]);
+  if (splitting && list.includes(splitting.t)) cancelSplit();
+  list.forEach(removeTrack);
+  const merged = addTrack({ name: list.map((t) => t.name).join(' + '), lines, wpts }, index);
+  selectTrack(merged.id);
+  toast(`${list.length} tracks samengevoegd`);
+}
 
 function selectTrack(id) {
   const t = tracks.find((x) => x.id === id);
