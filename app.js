@@ -237,10 +237,20 @@ async function searchNominatim(q) {
   });
 }
 
+let searchStatus = ''; // '' | 'busy' (online search pending) | 'none' (nothing found)
+
+function setSearchStatus(status) {
+  searchStatus = status;
+  searchBox.classList.toggle('loading', status === 'busy');
+}
+
 function renderSearchResults() {
+  const status = searchStatus === 'busy' ? 'Zoeken naar straten en adressen…'
+    : searchStatus === 'none' && !searchResults.length ? 'Niets gevonden' : '';
   searchList.innerHTML = searchResults.map((r, i) =>
-    `<li role="option" data-i="${i}" class="${i === searchActive ? 'active' : ''}"><b>${escapeHtml(r.name)}</b><span>${escapeHtml(r.where)}</span></li>`).join('');
-  searchList.classList.toggle('hidden', !searchResults.length);
+    `<li role="option" data-i="${i}" class="${i === searchActive ? 'active' : ''}"><b>${escapeHtml(r.name)}</b><span>${escapeHtml(r.where)}</span></li>`).join('')
+    + (status ? `<li class="search-status">${status}</li>` : '');
+  searchList.classList.toggle('hidden', !searchResults.length && !status);
 }
 
 function setSearchResults(results) {
@@ -277,7 +287,17 @@ async function runSearch(q) {
   let online = [];
   try { online = await searchOnline(q); } catch (err) { console.warn(err); }
   if (seq !== searchSeq) return;
-  setSearchResults([...local, ...online]);
+  const results = [...local, ...online];
+  setSearchStatus(results.length ? '' : 'none');
+  setSearchResults(results);
+}
+
+function clearSearchResults() {
+  clearTimeout(searchTimer);
+  searchSeq++;
+  setSearchStatus('');
+  searchResults = [];
+  renderSearchResults();
 }
 
 function selectSearchResult(i) {
@@ -296,19 +316,18 @@ function selectSearchResult(i) {
   searchMarker.setLatLng([lat, lng]).bindPopup(popup).addTo(map).openPopup();
 
   searchInput.value = r.name;
-  searchSeq++;
-  searchResults = [];
-  renderSearchResults();
+  clearSearchResults();
   searchInput.blur();
 }
 
 searchInput.addEventListener('focus', loadPlaces);
 searchInput.addEventListener('input', () => {
-  clearTimeout(searchTimer);
   const q = searchInput.value.trim();
+  if (q.length < 2) return clearSearchResults();
+  clearTimeout(searchTimer);
   searchSeq++;
-  if (q.length < 2) { searchResults = []; renderSearchResults(); return; }
   loadPlaces();
+  setSearchStatus('busy');
   showLocalResults(q);
   searchTimer = setTimeout(() => runSearch(q), Date.now() > photonDownUntil ? 200 : 500);
 });
@@ -324,17 +343,18 @@ searchInput.addEventListener('keydown', (e) => {
     const q = searchInput.value.trim();
     if (q.length < 2) return;
     clearTimeout(searchTimer);
+    setSearchStatus('busy');
+    renderSearchResults();
     runSearch(q).then(() => selectSearchResult(0));
   } else if (e.key === 'Escape') {
-    searchResults = [];
-    renderSearchResults();
+    clearSearchResults();
     searchInput.blur();
   }
 });
 searchInput.addEventListener('blur', () => setTimeout(() => searchList.classList.add('hidden'), 150));
 // mousedown instead of click so the selection happens before the input's blur hides the list.
 searchList.addEventListener('mousedown', (e) => {
-  const li = e.target.closest('li');
+  const li = e.target.closest('li[data-i]');
   if (li) { e.preventDefault(); selectSearchResult(+li.dataset.i); }
 });
 

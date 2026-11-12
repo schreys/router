@@ -141,6 +141,13 @@ main { flex: 1; position: relative; }
 .search-results li span { color: #777; font-size: 12px; }
 .search-results li.active, .search-results li:hover { background: #eef6e8; }
 .search-popup button { margin-top: 6px; }
+.search-results li.search-status { cursor: default; color: #777; font-style: italic; background: none; }
+.search-box.loading::after {
+  content: ''; position: absolute; right: 10px; top: 50%; width: 14px; height: 14px; margin-top: -9px;
+  border: 2px solid #ccc; border-top-color: #5a9e2f; border-radius: 50%; animation: search-spin .7s linear infinite;
+}
+.search-box.loading input { padding-right: 32px; }
+@keyframes search-spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 700px) {
   body { flex-direction: column-reverse; }
