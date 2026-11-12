@@ -5,6 +5,7 @@ A small static web app for viewing and planning bike routes on OpenCycleMap.
 ## Features
 
 - **Map layers**: OpenCycleMap, Outdoors and Landscape (Thunderforest, need an API key), CyclOSM, OpenStreetMap, plus an overlay with cycle node networks/routes (Waymarked Trails).
+- **Place search** on the map (search-as-you-type via [Photon](https://photon.komoot.io), falling back to [Nominatim](https://nominatim.openstreetmap.org) when Photon is unavailable); a found place can be added to the route.
 - **Route planning**: click "Route tekenen" and click points on the map. The route follows roads via [BRouter](https://brouter.de) (profiles: touring bike, road bike, safe, MTB, shortest, hiking) or straight lines.
 - **Route editing**: drag points (the route is re-calculated live while dragging), drag the line (or click it) to insert a point there, right-click or double-click a point to delete it, undo (Ctrl/Cmd+Z), reverse.
 - **GPX**: load multiple GPX files (button or drag-and-drop), show/hide them, and convert one to an editable route with "Bewerk als route". Export the current route as GPX.

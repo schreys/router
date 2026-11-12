@@ -128,6 +128,151 @@ $('saveKey').addEventListener('click', () => {
 });
 buildLayers();
 
+// ---------- Place search (Photon geocoder by komoot, OpenStreetMap data) ----------
+const searchMarker = L.marker([0, 0], { keyboard: false });
+
+const SearchControl = L.Control.extend({
+  options: { position: 'topleft' },
+  onAdd() {
+    const box = L.DomUtil.create('div', 'search-box');
+    box.innerHTML = '<input type="search" placeholder="🔍 Zoek een plaats…" aria-label="Zoek een plaats" autocomplete="off" /><ul class="search-results hidden" role="listbox"></ul>';
+    L.DomEvent.disableClickPropagation(box);
+    L.DomEvent.disableScrollPropagation(box);
+    return box;
+  },
+});
+const searchBox = new SearchControl().addTo(map).getContainer();
+searchBox.parentNode.prepend(searchBox); // above the zoom buttons
+const searchInput = searchBox.querySelector('input');
+const searchList = searchBox.querySelector('ul');
+let searchResults = [];
+let searchActive = -1;
+let searchTimer = null;
+let searchSeq = 0;
+// Photon (fast, made for search-as-you-type) is preferred; Nominatim is the fallback when Photon is
+// down. Nominatim's usage policy allows at most 1 request per second, hence the slower debounce.
+let photonDownUntil = 0;
+let lastNominatim = 0;
+
+function placeLabel(p) {
+  const name = p.name || [p.street, p.housenumber].filter(Boolean).join(' ');
+  const where = [p.postcode && p.city ? `${p.postcode} ${p.city}` : p.city || p.county, p.country].filter((x) => x && x !== name);
+  return { name: name || where.shift() || '?', where: where.join(', ') };
+}
+
+async function searchPhoton(q) {
+  const c = map.getCenter();
+  const res = await fetch(`https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=6&lat=${c.lat.toFixed(4)}&lon=${c.lng.toFixed(4)}`,
+    { signal: AbortSignal.timeout(2500) });
+  if (!res.ok) throw new Error(`Photon ${res.status}`);
+  return (await res.json()).features.map((f) => {
+    const ext = f.properties.extent; // [minLon, maxLat, maxLon, minLat]
+    return {
+      ...placeLabel(f.properties),
+      lat: f.geometry.coordinates[1], lng: f.geometry.coordinates[0],
+      bounds: ext && [[ext[3], ext[0]], [ext[1], ext[2]]],
+    };
+  });
+}
+
+async function searchNominatim(q) {
+  await sleep(Math.max(0, lastNominatim + 1000 - Date.now()));
+  lastNominatim = Date.now();
+  const b = map.getBounds();
+  const res = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&addressdetails=1&accept-language=nl&q=${encodeURIComponent(q)}`
+    + `&viewbox=${b.getWest()},${b.getNorth()},${b.getEast()},${b.getSouth()}`);
+  if (!res.ok) throw new Error(`Nominatim ${res.status}`);
+  return (await res.json()).map((r) => {
+    const a = r.address || {};
+    const bb = r.boundingbox.map(Number); // [minLat, maxLat, minLon, maxLon]
+    return {
+      ...placeLabel({ name: r.name, street: a.road, housenumber: a.house_number, postcode: a.postcode,
+        city: a.city || a.town || a.village, county: a.county, country: a.country }),
+      lat: +r.lat, lng: +r.lon,
+      bounds: [[bb[0], bb[2]], [bb[1], bb[3]]],
+    };
+  });
+}
+
+function renderSearchResults() {
+  searchList.innerHTML = searchResults.map((r, i) =>
+    `<li role="option" data-i="${i}" class="${i === searchActive ? 'active' : ''}"><b>${escapeHtml(r.name)}</b><span>${escapeHtml(r.where)}</span></li>`).join('');
+  searchList.classList.toggle('hidden', !searchResults.length);
+}
+
+async function runSearch(q) {
+  const seq = ++searchSeq;
+  let results;
+  if (Date.now() > photonDownUntil) {
+    try { results = await searchPhoton(q); } catch (err) {
+      console.warn('Photon niet bereikbaar, Nominatim wordt gebruikt', err);
+      photonDownUntil = Date.now() + 5 * 60 * 1000;
+    }
+  }
+  if (seq !== searchSeq) return;
+  if (!results) {
+    try { results = await searchNominatim(q); } catch (err) { console.warn(err); return; }
+    if (seq !== searchSeq) return;
+  }
+  const seen = new Set();
+  searchResults = results.filter((r) => !seen.has(r.name + '|' + r.where) && seen.add(r.name + '|' + r.where));
+  searchActive = searchResults.length ? 0 : -1;
+  renderSearchResults();
+}
+
+function selectSearchResult(i) {
+  const r = searchResults[i];
+  if (!r) return;
+  const { lat, lng } = r;
+  if (r.bounds) map.fitBounds(r.bounds, { maxZoom: 16 });
+  else map.setView([lat, lng], 16);
+
+  const popup = L.DomUtil.create('div', 'search-popup');
+  popup.innerHTML = `<b>${escapeHtml(r.name)}</b><br><small>${escapeHtml(r.where)}</small><br><button class="small">➕ Aan route toevoegen</button>`;
+  popup.querySelector('button').addEventListener('click', () => {
+    addWaypoint({ lat, lng });
+    map.removeLayer(searchMarker);
+  });
+  searchMarker.setLatLng([lat, lng]).bindPopup(popup).addTo(map).openPopup();
+
+  searchInput.value = r.name;
+  searchResults = [];
+  renderSearchResults();
+  searchInput.blur();
+}
+
+searchInput.addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  const q = searchInput.value.trim();
+  if (q.length < 2) { searchSeq++; searchResults = []; renderSearchResults(); return; }
+  searchTimer = setTimeout(() => runSearch(q), Date.now() > photonDownUntil ? 250 : 800);
+});
+searchInput.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (!searchResults.length) return;
+    searchActive = (searchActive + (e.key === 'ArrowDown' ? 1 : -1) + searchResults.length) % searchResults.length;
+    renderSearchResults();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (searchResults.length) return selectSearchResult(Math.max(searchActive, 0));
+    const q = searchInput.value.trim();
+    if (q.length < 2) return;
+    clearTimeout(searchTimer);
+    runSearch(q).then(() => selectSearchResult(0));
+  } else if (e.key === 'Escape') {
+    searchResults = [];
+    renderSearchResults();
+    searchInput.blur();
+  }
+});
+searchInput.addEventListener('blur', () => setTimeout(() => searchList.classList.add('hidden'), 150));
+// mousedown instead of click so the selection happens before the input's blur hides the list.
+searchList.addEventListener('mousedown', (e) => {
+  const li = e.target.closest('li');
+  if (li) { e.preventDefault(); selectSearchResult(+li.dataset.i); }
+});
+
 // ---------- Route state ----------
 // Waypoints [{lat,lng}]; segments[i] connects waypoints[i] -> waypoints[i+1] with coords [[lat,lng,ele?]].
 let waypoints = [];
