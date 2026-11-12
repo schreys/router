@@ -120,6 +120,7 @@ main { flex: 1; position: relative; }
 }
 .wp-icon.start { border-color: #2f9e2f; background: #2f9e2f; }
 .wp-icon.end { border-color: #c4200f; background: #c4200f; }
+.wp-icon.ghost { opacity: .9; cursor: grab; transform: scale(.85); }
 
 @media (max-width: 700px) {
   body { flex-direction: column-reverse; }

@@ -214,16 +214,25 @@ function addWaypoint(latlng) {
   changed();
 }
 
-function insertWaypoint(segIndex, latlng) {
+// segIndex: segment to split. When k (index in its coords before the split point) is given, the existing
+// route is split at latlng, which lies on it, so both halves are already routed.
+function insertWaypoint(segIndex, latlng, k) {
   snapshot();
   const wp = { lat: latlng.lat, lng: latlng.lng };
+  const a = waypoints[segIndex];
+  const b = waypoints[segIndex + 1];
+  const old = segments[segIndex];
   waypoints.splice(segIndex + 1, 0, wp);
-  segments.splice(segIndex, 1, newSeg(waypoints[segIndex], wp), newSeg(wp, waypoints[segIndex + 2]));
+  const halves = k != null && !old.loading
+    ? [{ a, b: wp, coords: [...old.coords.slice(0, k + 1), [wp.lat, wp.lng]], loading: false },
+      { a: wp, b, coords: [[wp.lat, wp.lng], ...old.coords.slice(k + 1)], loading: false }]
+    : [newSeg(a, wp), newSeg(wp, b)];
+  segments.splice(segIndex, 1, ...halves);
   changed();
 }
 
-function moveWaypoint(i, latlng, preview = {}) {
-  snapshot();
+function moveWaypoint(i, latlng, preview = {}, snap = true) {
+  if (snap) snapshot();
   const wp = { lat: latlng.lat, lng: latlng.lng };
   waypoints[i] = wp;
   if (i > 0) segments[i - 1] = newSeg(waypoints[i - 1], wp, preview.prev);
@@ -288,12 +297,12 @@ function updateLive(latlng) {
   if (!$('straight').checked && !live.busy) fetchLive(live);
 }
 
-function endLive(latlng) {
+function endLive(latlng, snap = true) {
   const l = live;
   live = null;
   l.pos = { lat: latlng.lat, lng: latlng.lng };
   const c = liveCoords(l);
-  moveWaypoint(l.i, latlng, { prev: l.prev && c.prev, next: l.next && c.next });
+  moveWaypoint(l.i, latlng, { prev: l.prev && c.prev, next: l.next && c.next }, snap);
 }
 
 function removeWaypoint(i) {
@@ -317,28 +326,109 @@ function routeCoords() {
 const wpIcon = (cls) => L.divIcon({ className: '', html: `<div class="wp-icon ${cls}"></div>`, iconSize: [14, 14], iconAnchor: [7, 7] });
 
 let pendingRender = false;
+let wpMarkers = [];
 function renderRoute() {
   if (dragging) { pendingRender = true; return; }
   routeLayer.clearLayers();
   segLines = segments.map((s, i) => {
     const dashed = s.loading && s.slow;
     const hidden = s.loading && !s.slow && !s.placeholder;
-    const line = L.polyline(s.coords, {
-      color: '#e2621b', weight: 5, opacity: hidden ? 0 : 0.9, dashArray: dashed ? '6 8' : null, bubblingMouseEvents: false,
+    return L.polyline(s.coords, {
+      color: '#e2621b', weight: 5, opacity: hidden ? 0 : 0.9, dashArray: dashed ? '6 8' : null, interactive: false,
     }).addTo(routeLayer);
-    line.on('click', (e) => insertWaypoint(i, e.latlng));
-    return line;
+  });
+  // Wide invisible lines on top make the route easy to hit for inserting points.
+  segments.forEach((s, i) => {
+    const hit = L.polyline(s.coords, { weight: 20, opacity: 0, bubblingMouseEvents: false }).addTo(routeLayer);
+    hit.on('mousemove', (e) => showGhost(i, e.latlng));
+    hit.on('click', (e) => {
+      const g = nearestOnSegment(i, e.latlng);
+      hideGhost();
+      insertWaypoint(i, g.latlng, g.k);
+    });
   });
 
-  waypoints.forEach((wp, i) => {
+  wpMarkers = waypoints.map((wp, i) => {
     const cls = i === 0 ? 'start' : i === waypoints.length - 1 ? 'end' : '';
     const m = L.marker(wp, { icon: wpIcon(cls), draggable: true, title: `Punt ${i + 1} – rechtsklik om te verwijderen` }).addTo(routeLayer);
     m.on('dragstart', () => { dragging = true; startLive(i); });
     m.on('drag', (e) => updateLive(e.target.getLatLng()));
     m.on('dragend', (e) => { dragging = false; pendingRender = false; endLive(e.target.getLatLng()); });
     m.on('contextmenu dblclick', (e) => { L.DomEvent.stop(e); removeWaypoint(i); });
+    return m;
   });
 }
+
+// ---------- Inserting points by dragging the route ----------
+// Hovering the route shows a "ghost" point on it; dragging it inserts a waypoint there (with live
+// re-routing), clicking it inserts one in place.
+const ghostLayer = L.layerGroup().addTo(map);
+const ghost = L.marker([0, 0], {
+  icon: wpIcon('ghost'), draggable: true, zIndexOffset: -1000, title: 'Sleep om een tussenpunt toe te voegen',
+});
+let ghostAt = null;
+let ghostDragging = false;
+
+function nearestOnSegment(segIndex, latlng) {
+  const coords = segments[segIndex].coords;
+  const p = map.latLngToLayerPoint(latlng);
+  let best = null;
+  for (let k = 0; k < coords.length - 1; k++) {
+    const q = L.LineUtil.closestPointOnSegment(p, map.latLngToLayerPoint(coords[k]), map.latLngToLayerPoint(coords[k + 1]));
+    const d = q.distanceTo(p);
+    if (!best || d < best.d) best = { d, k, q };
+  }
+  return { seg: segIndex, k: best.k, dist: best.d, latlng: map.layerPointToLatLng(best.q) };
+}
+
+function showGhost(segIndex, latlng) {
+  if (ghostDragging || dragging || segments[segIndex].loading) return;
+  const g = nearestOnSegment(segIndex, latlng);
+  const pt = map.latLngToLayerPoint(g.latlng);
+  // Leave room to grab the existing waypoints.
+  if (waypoints.some((w) => map.latLngToLayerPoint(w).distanceTo(pt) < 14)) return hideGhost();
+  ghostAt = g;
+  ghost.setLatLng(g.latlng);
+  if (!ghostLayer.hasLayer(ghost)) ghost.addTo(ghostLayer);
+}
+
+function hideGhost() {
+  if (ghostDragging) return;
+  ghostLayer.clearLayers();
+  ghostAt = null;
+}
+
+// Map mousemove only fires off the route (the route and markers don't bubble their events).
+map.on('mousemove', hideGhost);
+ghost.on('mousemove', (e) => {
+  if (!ghostAt || ghostDragging) return;
+  if (nearestOnSegment(ghostAt.seg, e.latlng).dist > 12) hideGhost();
+  else showGhost(ghostAt.seg, e.latlng);
+});
+ghost.on('click', (e) => {
+  L.DomEvent.stop(e);
+  const g = ghostAt;
+  hideGhost();
+  if (g) insertWaypoint(g.seg, g.latlng, g.k);
+});
+ghost.on('dragstart', () => {
+  const g = ghostAt;
+  ghostDragging = true;
+  insertWaypoint(g.seg, g.latlng, g.k);
+  const i = g.seg + 1;
+  wpMarkers[i].setOpacity(0);
+  dragging = true;
+  startLive(i);
+});
+ghost.on('drag', (e) => updateLive(e.target.getLatLng()));
+ghost.on('dragend', (e) => {
+  ghostDragging = false;
+  dragging = false;
+  pendingRender = false;
+  hideGhost();
+  // insertWaypoint already made the undo snapshot.
+  endLive(e.target.getLatLng(), false);
+});
 
 function renderStats() {
   const coords = routeCoords();
