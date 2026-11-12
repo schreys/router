@@ -17,6 +17,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
  && for t in $TILES; do curl -fsSL -o "segments4/$t.rd5" "https://brouter.de/brouter/segments4/$t.rd5"; done \
  && rm -rf /tmp/brouter*
 
+# Place names for instant search in the browser (see deploy/build-places.sh).
+ARG PLACES_COUNTRIES="BE NL LU FR"
+COPY deploy/build-places.sh /tmp/build-places.sh
+RUN mkdir -p /app/data && sh /tmp/build-places.sh /app/data/places.json $PLACES_COUNTRIES && rm /tmp/build-places.sh
+
 COPY --from=caddy /usr/bin/caddy /usr/bin/caddy
 COPY deploy/Caddyfile /etc/caddy/Caddyfile
 COPY --chmod=755 deploy/entrypoint.sh /entrypoint.sh

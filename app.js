@@ -149,10 +149,53 @@ let searchResults = [];
 let searchActive = -1;
 let searchTimer = null;
 let searchSeq = 0;
-// Photon (fast, made for search-as-you-type) is preferred; Nominatim is the fallback when Photon is
-// down. Nominatim's usage policy allows at most 1 request per second, hence the slower debounce.
-let photonDownUntil = 0;
+// Cities, villages and boroughs are searched instantly in a local list (places.json, built into the
+// Docker image from GeoNames); streets, addresses and POIs come from an online geocoder. Photon (made
+// for search-as-you-type) is preferred, Nominatim is the fallback when Photon is down; Nominatim's
+// usage policy allows at most 1 request per second, hence the throttle and slower debounce.
+let photonDownUntil = +localStorage.getItem('photonDownUntil') || 0;
 let lastNominatim = 0;
+let places = null;
+const COUNTRY_NAMES = { BE: 'België', NL: 'Nederland', LU: 'Luxemburg', FR: 'Frankrijk', DE: 'Duitsland' };
+const normalize = (s) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[-'’.]/g, ' ').replace(/\s+/g, ' ').trim();
+
+let placesLoading = null;
+function loadPlaces() {
+  placesLoading ??= fetch('places.json')
+    .then((res) => (res.ok ? res.json() : []))
+    .catch(() => [])
+    .then((rows) => {
+      if (rows.length) map.attributionControl.addAttribution('Plaatsnamen &copy; <a href="https://www.geonames.org">GeoNames</a>');
+      places = rows.map(([name, lat, lng, region, cc, pop, alt]) => ({
+        name, lat, lng, region, cc, pop, key: normalize(name), alts: alt ? alt.split('|').map(normalize) : [],
+      }));
+      const q = searchInput.value.trim();
+      if (q.length >= 2 && document.activeElement === searchInput) showLocalResults(q);
+    });
+  return placesLoading;
+}
+
+function searchPlaces(q) {
+  if (!places) return [];
+  const nq = normalize(q);
+  const matches = [];
+  for (const p of places) {
+    let score;
+    if (p.key === nq || p.alts.includes(nq)) score = 0;
+    else if (p.key.startsWith(nq)) score = 1;
+    else if (p.alts.some((a) => a.startsWith(nq))) score = 2;
+    else if (p.key.includes(` ${nq}`)) score = 3;
+    else continue;
+    matches.push({ p, score });
+  }
+  matches.sort((a, b) => a.score - b.score || b.p.pop - a.p.pop);
+  return matches.slice(0, 5).map(({ p }) => ({
+    name: p.name,
+    where: [p.region, COUNTRY_NAMES[p.cc] || p.cc].filter((x) => x && x !== p.name).join(', '),
+    lat: p.lat, lng: p.lng,
+    zoom: p.pop > 100000 ? 12 : p.pop > 10000 ? 13 : 14,
+  }));
+}
 
 function placeLabel(p) {
   const name = p.name || [p.street, p.housenumber].filter(Boolean).join(' ');
@@ -200,24 +243,41 @@ function renderSearchResults() {
   searchList.classList.toggle('hidden', !searchResults.length);
 }
 
-async function runSearch(q) {
-  const seq = ++searchSeq;
-  let results;
-  if (Date.now() > photonDownUntil) {
-    try { results = await searchPhoton(q); } catch (err) {
-      console.warn('Photon niet bereikbaar, Nominatim wordt gebruikt', err);
-      photonDownUntil = Date.now() + 5 * 60 * 1000;
-    }
+function setSearchResults(results) {
+  // Drop duplicates, e.g. the same town from the local list and the online geocoder.
+  const unique = [];
+  for (const r of results) {
+    const dup = unique.some((u) => normalize(u.name) === normalize(r.name)
+      && (u.where === r.where || L.latLng(u.lat, u.lng).distanceTo([r.lat, r.lng]) < 3000));
+    if (!dup) unique.push(r);
   }
-  if (seq !== searchSeq) return;
-  if (!results) {
-    try { results = await searchNominatim(q); } catch (err) { console.warn(err); return; }
-    if (seq !== searchSeq) return;
-  }
-  const seen = new Set();
-  searchResults = results.filter((r) => !seen.has(r.name + '|' + r.where) && seen.add(r.name + '|' + r.where));
+  searchResults = unique.slice(0, 8);
   searchActive = searchResults.length ? 0 : -1;
   renderSearchResults();
+}
+
+function showLocalResults(q) {
+  setSearchResults(searchPlaces(q));
+}
+
+async function searchOnline(q) {
+  if (Date.now() > photonDownUntil) {
+    try { return await searchPhoton(q); } catch (err) {
+      console.warn('Photon niet bereikbaar, Nominatim wordt gebruikt', err);
+      photonDownUntil = Date.now() + 60 * 60 * 1000;
+      localStorage.setItem('photonDownUntil', photonDownUntil);
+    }
+  }
+  return searchNominatim(q);
+}
+
+async function runSearch(q) {
+  const seq = ++searchSeq;
+  const local = searchPlaces(q);
+  let online = [];
+  try { online = await searchOnline(q); } catch (err) { console.warn(err); }
+  if (seq !== searchSeq) return;
+  setSearchResults([...local, ...online]);
 }
 
 function selectSearchResult(i) {
@@ -225,7 +285,7 @@ function selectSearchResult(i) {
   if (!r) return;
   const { lat, lng } = r;
   if (r.bounds) map.fitBounds(r.bounds, { maxZoom: 16 });
-  else map.setView([lat, lng], 16);
+  else map.setView([lat, lng], r.zoom || 16);
 
   const popup = L.DomUtil.create('div', 'search-popup');
   popup.innerHTML = `<b>${escapeHtml(r.name)}</b><br><small>${escapeHtml(r.where)}</small><br><button class="small">➕ Aan route toevoegen</button>`;
@@ -236,16 +296,21 @@ function selectSearchResult(i) {
   searchMarker.setLatLng([lat, lng]).bindPopup(popup).addTo(map).openPopup();
 
   searchInput.value = r.name;
+  searchSeq++;
   searchResults = [];
   renderSearchResults();
   searchInput.blur();
 }
 
+searchInput.addEventListener('focus', loadPlaces);
 searchInput.addEventListener('input', () => {
   clearTimeout(searchTimer);
   const q = searchInput.value.trim();
-  if (q.length < 2) { searchSeq++; searchResults = []; renderSearchResults(); return; }
-  searchTimer = setTimeout(() => runSearch(q), Date.now() > photonDownUntil ? 250 : 800);
+  searchSeq++;
+  if (q.length < 2) { searchResults = []; renderSearchResults(); return; }
+  loadPlaces();
+  showLocalResults(q);
+  searchTimer = setTimeout(() => runSearch(q), Date.now() > photonDownUntil ? 200 : 500);
 });
 searchInput.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
