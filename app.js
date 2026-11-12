@@ -114,36 +114,25 @@ const cacheKey = (a, b, profile) => `${profile}|${a.lat.toFixed(6)},${a.lng.toFi
 const pendingRoutes = new Map();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// An own BRouter server is preferred: the one bundled in the Docker image (proxied at /brouter on the
-// same origin), or brouter/start.sh during local development. brouter.de is the fallback when neither
-// is running or when it lacks the map tile for the requested area.
-const DEV_ROUTER = 'http://localhost:17777/brouter';
-const ROUTER_CANDIDATES = [`${location.origin}/brouter`];
-if (['localhost', '127.0.0.1'].includes(location.hostname)) ROUTER_CANDIDATES.push(DEV_ROUTER);
+// The Docker image (also used locally via docker compose) runs its own BRouter, proxied at /brouter on
+// the same origin. brouter.de is the fallback when it isn't available (e.g. a plain static file server)
+// or when it lacks the map tile for the requested area.
+const OWN_ROUTER = `${location.origin}/brouter`;
 const PUBLIC_ROUTER = 'https://brouter.de/brouter';
 let ownRouter = null;
 
 function setOwnRouter(url) {
   ownRouter = url;
-  $('routerStatus').textContent = url === DEV_ROUTER ? '⚡ Lokale BRouter-server (localhost:17777)'
-    : url ? '⚡ Eigen BRouter-server'
-    : ROUTER_CANDIDATES.includes(DEV_ROUTER) ? 'Routing via brouter.de – start brouter/start.sh voor lokale routing'
-    : 'Routing via brouter.de';
-}
-
-async function isBRouter(url) {
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(1500) });
-    // BRouter answers 404 (with a CORS header) here; a 5xx comes from the proxy while BRouter is down.
-    // Cross-origin, the fetch only succeeds thanks to BRouter's CORS header; same-origin, check it explicitly.
-    const sameOrigin = new URL(url).origin === location.origin;
-    return res.status < 500 && (!sameOrigin || res.headers.has('access-control-allow-origin'));
-  } catch { return false; }
+  $('routerStatus').textContent = url ? '⚡ Eigen BRouter-server' : 'Routing via brouter.de';
 }
 
 async function checkOwnRouter() {
-  for (const url of ROUTER_CANDIDATES) if (await isBRouter(url)) return setOwnRouter(url);
-  setOwnRouter(null);
+  try {
+    const res = await fetch(OWN_ROUTER, { signal: AbortSignal.timeout(1500) });
+    // BRouter answers 404 here, with a CORS header that other static servers don't send;
+    // a 5xx comes from the proxy while BRouter is still starting or down.
+    setOwnRouter(res.status < 500 && res.headers.has('access-control-allow-origin') ? OWN_ROUTER : null);
+  } catch { setOwnRouter(null); }
 }
 checkOwnRouter();
 setInterval(() => { if (!ownRouter) checkOwnRouter(); }, 30000);

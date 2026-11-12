@@ -15,34 +15,20 @@ A small static web app for viewing and planning bike routes on OpenCycleMap.
 
 ```bash
 cd komoot-clone
-python3 -m http.server 8000
+docker compose up --build
 ```
 
-Then open <http://localhost:8000>. Use a local server rather than `file://`, because some tile servers require a Referer header.
+Then open <http://localhost:8080>. This runs the same container as in production (see [Dockerfile](Dockerfile)): [Caddy](https://caddyserver.com) serves the web app and proxies `/brouter` to an own [BRouter](https://github.com/abrensch/brouter) server, so routing is fast and not rate-limited. The project folder is mounted into the container, so changes to `index.html`, `app.js` and `style.css` only need a browser reload; rebuild (`--build`) after changing the Dockerfile or `deploy/`.
 
-## Local routing (optional)
+The app checks for its own BRouter at `/brouter` (status shown under "Rechte lijnen") and falls back to the public server at brouter.de when it isn't available, e.g. with a plain static server like `python3 -m http.server`, or when a route is outside the downloaded area. brouter.de rate-limits heavy use (HTTP 403 "Please, retry later!"). Only the routing runs in the container; the map tiles are loaded online.
 
-By default routes are calculated by the public server at brouter.de, which rate-limits heavy use (HTTP 403 "Please, retry later!"). For fast, unlimited routing, run BRouter locally (needs Java 11+):
+### Routing data
 
-```bash
-brouter/start.sh   # serves http://localhost:17777
-```
-
-The app detects the local server automatically (status shown under "Rechte lijnen"); it falls back to brouter.de when the server isn't running or the route is outside the downloaded area. Only the routing is local; the map tiles are still loaded online.
-
-Setup (already done in this folder, ignored by git): unzip the [BRouter release](https://github.com/abrensch/brouter/releases) into `brouter/` and put routing data tiles (`.rd5`, 5°×5° each, e.g. `E0_N50.rd5` for most of Belgium) from <https://brouter.de/brouter/segments4/> into `brouter/segments4/`. Re-download the tiles occasionally to get recent OpenStreetMap changes.
+BRouter and its routing data tiles (`.rd5`, 5°×5° each, from <https://brouter.de/brouter/segments4/>) are downloaded during the Docker build. The `TILES` build arg (default `E0_N50`, covering most of Belgium, the western Netherlands and northern France) selects the tiles, e.g. `TILES="E0_N50 E5_N50"`; more tiles need more memory. The tiles are refreshed weekly upstream; rebuild without cache (`docker compose build --no-cache`) to pick up recent OpenStreetMap changes.
 
 ## Deployment (Render)
 
-The [Dockerfile](Dockerfile) builds one container with the web app and its own BRouter server: [Caddy](https://caddyserver.com) serves the static files and proxies `/brouter` to BRouter, which the app uses automatically when it isn't running on localhost. BRouter and the routing tiles (`TILES` build arg, default `E0_N50`) are downloaded during the build.
-
-On Render: **New → Blueprint**, select this repository; [render.yaml](render.yaml) creates a Docker web service. Every push to `main` redeploys. To refresh the routing data, use **Manual Deploy → Clear build cache & deploy**.
-
-Test the image locally:
-
-```bash
-docker build -t router . && docker run --rm -p 8080:10000 router   # http://localhost:8080
-```
+On Render: **New → Blueprint**, select this repository; [render.yaml](render.yaml) creates a Docker web service from the same Dockerfile. Every push to `main` redeploys. To refresh the routing data, use **Manual Deploy → Clear build cache & deploy**.
 
 On the free plan the service sleeps after 15 minutes without traffic (first visit then takes about a minute) and has little CPU, so long routes are slow; the Starter plan avoids both.
 

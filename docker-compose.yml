@@ -1,0 +1,10 @@
+# Local development with the same setup as production (Dockerfile): http://localhost:8080
+# The project folder is mounted as the web root, so edits to index.html/app.js/style.css only need a reload.
+services:
+  app:
+    build: .
+    ports:
+      - "8080:10000"
+    volumes:
+      - .:/srv/www:ro
+    mem_limit: 512m
