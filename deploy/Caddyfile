@@ -6,6 +6,11 @@
 :{$PORT} {
 	encode gzip
 
+	handle /segments.json {
+		root * /app/brouter
+		file_server
+	}
+
 	handle /brouter* {
 		reverse_proxy localhost:17777
 	}

@@ -51,6 +51,36 @@ L.control.scale({ imperial: false }).addTo(map);
 let layerControl = null;
 let baseLayers = {};
 
+// Overlay with BRouter's 5x5° routing data tiles (named after their south-west corner, e.g. E0_N50);
+// tiles available on the own server (listed in /segments.json by the Docker image) are green.
+const segmentLayer = L.layerGroup();
+const tileName = (lng, lat) => `${lng < 0 ? 'W' : 'E'}${Math.abs(lng)}_${lat < 0 ? 'S' : 'N'}${Math.abs(lat)}`;
+
+async function buildSegmentLayer() {
+  let available = [];
+  try {
+    const res = await fetch('segments.json');
+    if (res.ok) available = await res.json();
+  } catch { /* no own server: show the grid only */ }
+  segmentLayer.clearLayers();
+  for (let lng = -25; lng < 45; lng += 5) {
+    for (let lat = 30; lat < 75; lat += 5) {
+      const name = tileName(lng, lat);
+      const own = available.includes(name);
+      L.rectangle([[lat, lng], [lat + 5, lng + 5]], {
+        interactive: false, weight: own ? 2 : 1, color: own ? '#2f9e2f' : '#666',
+        fillColor: '#2f9e2f', fillOpacity: own ? 0.12 : 0, dashArray: own ? null : '4 4',
+      }).addTo(segmentLayer);
+      L.marker([lat + 2.5, lng + 2.5], {
+        interactive: false,
+        keyboard: false,
+        icon: L.divIcon({ className: `segment-label${own ? ' own' : ''}`, html: own ? `${name} ✓` : name, iconSize: [90, 18], iconAnchor: [45, 9] }),
+      }).addTo(segmentLayer);
+    }
+  }
+}
+buildSegmentLayer();
+
 function buildLayers() {
   const key = localStorage.getItem('tfKey') || '';
   const tf = (style, name) => L.tileLayer(`https://{s}.tile.thunderforest.com/${style}/{z}/{x}/{y}{r}.png?apikey=${encodeURIComponent(key)}`, {
@@ -73,6 +103,7 @@ function buildLayers() {
     'Fietsknooppunten & -routes': L.tileLayer('https://tile.waymarkedtrails.org/cycling/{z}/{x}/{y}.png', {
       maxZoom: 18, opacity: 0.8, attribution: '<a href="https://cycling.waymarkedtrails.org">Waymarked Trails</a>',
     }),
+    'BRouter-segmenten': segmentLayer,
   };
 
   Object.values(baseLayers).forEach((l) => map.removeLayer(l));

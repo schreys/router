@@ -24,7 +24,7 @@ The app checks for its own BRouter at `/brouter` (status shown under "Rechte lij
 
 ### Routing data
 
-BRouter and its routing data tiles (`.rd5`, 5°×5° each, from <https://brouter.de/brouter/segments4/>) are downloaded during the Docker build. The `TILES` build arg (default `E0_N50`, covering most of Belgium, the western Netherlands and northern France) selects the tiles, e.g. `TILES="E0_N50 E5_N50"`; more tiles need more memory. The tiles are refreshed weekly upstream; rebuild without cache (`docker compose build --no-cache`) to pick up recent OpenStreetMap changes.
+BRouter and its routing data tiles (`.rd5`, 5°×5° each, from <https://brouter.de/brouter/segments4/>) are downloaded during the Docker build. The `TILES` build arg (default `E0_N50`, covering most of Belgium, the western Netherlands and northern France) selects the tiles, e.g. `TILES="E0_N50 E5_N50"`; more tiles need more memory. Turn on the map overlay **BRouter-segmenten** (layers button, top right) to see the tile grid; tiles available on the own server are green. The tiles are refreshed weekly upstream; rebuild without cache (`docker compose build --no-cache`) to pick up recent OpenStreetMap changes.
 
 ## Deployment (Render)
 
