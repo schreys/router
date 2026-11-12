@@ -23,6 +23,8 @@
 
 	handle {
 		root * /srv/www
+		# Always revalidate (cheap 304 when unchanged), so changes to app.js/style.css show up right away.
+		header Cache-Control "no-cache"
 		file_server
 	}
 }

@@ -128,7 +128,7 @@ main { flex: 1; position: relative; }
 }
 .segment-label.own { color: #1f7a1f; }
 
-.search-box { position: relative; width: 280px; max-width: calc(100vw - 80px); }
+.leaflet-control.search-box { position: relative; z-index: 801; /* above the zoom buttons (Leaflet controls are 800) */ width: 280px; max-width: calc(100vw - 80px); }
 .search-box input {
   width: 100%; box-sizing: border-box; padding: 8px 10px; font-size: 14px;
   border: 2px solid rgba(0,0,0,.2); border-radius: 6px; background: #fff; background-clip: padding-box;
