@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fietsplanner – komoot clone</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <aside id="sidebar">
+    <header>
+      <h1>🚲 Fietsplanner</h1>
+    </header>
+
+    <section>
+      <h2>Kaart</h2>
+      <label class="field">
+        Thunderforest API-key (OpenCycleMap)
+        <div class="row">
+          <input id="apiKey" type="password" placeholder="plak je key hier" />
+          <button id="saveKey" title="Opslaan">💾</button>
+        </div>
+        <small>Gratis key via <a href="https://manage.thunderforest.com/" target="_blank" rel="noopener">thunderforest.com</a>. Zonder key wordt CyclOSM gebruikt.</small>
+      </label>
+    </section>
+
+    <section>
+      <h2>Route plannen</h2>
+      <div class="row">
+        <button id="drawToggle" class="primary">✏️ Route tekenen</button>
+      </div>
+      <label class="field">
+        Profiel
+        <select id="profile">
+          <option value="trekking">Toerfiets</option>
+          <option value="fastbike">Racefiets</option>
+          <option value="safety">Veilig (rustige wegen)</option>
+          <option value="mtb">Mountainbike</option>
+          <option value="shortest">Kortste</option>
+          <option value="hiking-mountain">Wandelen</option>
+        </select>
+      </label>
+      <label class="check"><input id="straight" type="checkbox" /> Rechte lijnen (geen routing)</label>
+      <p class="hint" id="routerStatus"></p>
+      <label class="field">
+        Naam
+        <input id="routeName" type="text" value="Mijn route" />
+      </label>
+      <div class="row wrap">
+        <button id="undo" title="Ongedaan maken (Ctrl+Z)">↶ Ongedaan</button>
+        <button id="reverse">⇄ Omkeren</button>
+        <button id="clear">🗑 Wissen</button>
+        <button id="export" class="primary">⬇ GPX</button>
+      </div>
+      <div id="stats" class="stats"></div>
+      <p class="hint">
+        Klik op de kaart om punten toe te voegen. Sleep een punt om het te verplaatsen,
+        klik op de lijn om een tussenpunt in te voegen, rechtsklik (of dubbelklik) op een punt om het te verwijderen.
+      </p>
+    </section>
+
+    <section>
+      <h2>GPX-bestanden</h2>
+      <label id="dropzone" class="dropzone">
+        <input id="gpxInput" type="file" accept=".gpx,application/gpx+xml" multiple hidden />
+        GPX hier neerzetten of <u>bestanden kiezen</u>
+      </label>
+      <ul id="trackList" class="track-list"></ul>
+    </section>
+  </aside>
+
+  <main>
+    <div id="map"></div>
+    <div id="elevation" class="hidden">
+      <div class="elev-header">
+        <span id="elevTitle">Hoogteprofiel</span>
+        <button id="elevClose" title="Sluiten">✕</button>
+      </div>
+      <canvas id="elevCanvas"></canvas>
+    </div>
+    <div id="toast" class="hidden"></div>
+  </main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

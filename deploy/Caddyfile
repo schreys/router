@@ -1,0 +1,17 @@
+{
+	admin off
+	auto_https off
+}
+
+:{$PORT} {
+	encode gzip
+
+	handle /brouter* {
+		reverse_proxy localhost:17777
+	}
+
+	handle {
+		root * /srv/www
+		file_server
+	}
+}
