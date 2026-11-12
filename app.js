@@ -308,8 +308,9 @@ function selectSearchResult(i) {
   else map.setView([lat, lng], r.zoom || 16);
 
   const popup = L.DomUtil.create('div', 'search-popup');
-  popup.innerHTML = `<b>${escapeHtml(r.name)}</b><br><small>${escapeHtml(r.where)}</small><br><button class="small">➕ Aan route toevoegen</button>`;
+  popup.innerHTML = `<b>${escapeHtml(r.name)}</b><br><small>${escapeHtml(r.where)}</small><br><button class="small">${editingId ? '➕ Aan route toevoegen' : '➕ Nieuwe route vanaf hier'}</button>`;
   popup.querySelector('button').addEventListener('click', () => {
+    if (!editingId) createRoute();
     addWaypoint({ lat, lng });
     map.removeLayer(searchMarker);
   });
@@ -359,12 +360,23 @@ searchList.addEventListener('mousedown', (e) => {
 });
 
 // ---------- Route state ----------
-// Waypoints [{lat,lng}]; segments[i] connects waypoints[i] -> waypoints[i+1] with coords [[lat,lng,ele?]].
+// All routes (drawn or imported from GPX) live in `routes`: { id, name, color, visible, wps, segs, wpts }.
+// wps are the waypoints [{lat,lng}]; segs[i] connects wps[i] -> wps[i+1] with coords [[lat,lng,ele?]];
+// wpts are named points from an imported GPX file.
+// At most one route is in edit mode: its wps/segs are the editor's `waypoints`/`segments` (same
+// arrays, synced back in changed()); all other routes are drawn read-only.
+const routes = [];
+let routeSeq = 0;
+let editingId = null;
+let selectedId = null;
 let waypoints = [];
 let segments = [];
-const undoStack = [];
-let drawing = false;
+let undoStack = [];
 let dragging = false;
+let cutting = false;
+
+const editingRoute = () => routes.find((r) => r.id === editingId) || null;
+const routeById = (id) => routes.find((r) => r.id === id);
 
 const routeLayer = L.layerGroup().addTo(map);
 let segLines = [];
@@ -450,10 +462,13 @@ function newSeg(a, b, placeholder) {
   return seg;
 }
 
-function snapshot() {
+// extra.restoreRoute: a route that was removed by this step (e.g. joined into the edited one) and
+// comes back on undo.
+function snapshot(extra = {}) {
   undoStack.push(JSON.stringify({
     wps: waypoints,
     segs: segments.map((s) => ({ coords: s.coords, loading: s.loading })),
+    ...(extra.restoreRoute && { restoreRoute: serializeRoute(extra.restoreRoute), restoreIndex: routes.indexOf(extra.restoreRoute) }),
   }));
   if (undoStack.length > 100) undoStack.shift();
 }
@@ -461,9 +476,15 @@ function snapshot() {
 function restore(json) {
   const snap = JSON.parse(json);
   waypoints = snap.wps;
-  segments = snap.segs.map((s, i) => s.loading
-    ? newSeg(waypoints[i], waypoints[i + 1])
-    : { a: waypoints[i], b: waypoints[i + 1], coords: s.coords, loading: false });
+  segments = buildSegs(waypoints, snap.segs);
+  if (snap.restoreRoute) routes.splice(snap.restoreIndex, 0, deserializeRoute(snap.restoreRoute));
+}
+
+// Rebuilds segment objects from stored { coords, loading }; unfinished ones are routed again.
+function buildSegs(wps, segs) {
+  return segs.map((s, i) => (s.loading
+    ? newSeg(wps[i], wps[i + 1])
+    : { a: wps[i], b: wps[i + 1], coords: s.coords, loading: false }));
 }
 
 function addWaypoint(latlng) {
@@ -471,7 +492,6 @@ function addWaypoint(latlng) {
   const wp = { lat: latlng.lat, lng: latlng.lng };
   if (waypoints.length) segments.push(newSeg(waypoints[waypoints.length - 1], wp));
   waypoints.push(wp);
-  profileSource = 'route';
   changed();
 }
 
@@ -578,11 +598,13 @@ function removeWaypoint(i) {
   changed();
 }
 
-function routeCoords() {
+const joinSegs = (segs) => {
   const out = [];
-  segments.forEach((s, i) => out.push(...(i === 0 ? s.coords : s.coords.slice(1))));
+  segs.forEach((s, i) => out.push(...(i === 0 ? s.coords : s.coords.slice(1))));
   return out;
-}
+};
+const routeCoords = () => joinSegs(segments);
+const coordsOf = (r) => (r.id === editingId ? routeCoords() : joinSegs(r.segs));
 
 const wpIcon = (cls) => L.divIcon({ className: '', html: `<div class="wp-icon ${cls}"></div>`, iconSize: [14, 14], iconAnchor: [7, 7] });
 
@@ -598,12 +620,13 @@ function renderRoute() {
       color: '#e2621b', weight: 5, opacity: hidden ? 0 : 0.9, dashArray: dashed ? '6 8' : null, interactive: false,
     }).addTo(routeLayer);
   });
-  // Wide invisible lines on top make the route easy to hit for inserting points.
+  // Wide invisible lines on top make the route easy to hit for inserting points (or cutting).
   segments.forEach((s, i) => {
     const hit = L.polyline(s.coords, { weight: 20, opacity: 0, bubblingMouseEvents: false }).addTo(routeLayer);
-    hit.on('mousemove', (e) => showGhost(i, e.latlng));
+    hit.on('mousemove', (e) => (cutting ? showCutMarker(i, e.latlng) : showGhost(i, e.latlng)));
     hit.on('click', (e) => {
       const g = nearestOnSegment(i, e.latlng);
+      if (cutting) return cutRoute(g);
       hideGhost();
       insertWaypoint(i, g.latlng, g.k);
     });
@@ -643,7 +666,7 @@ function nearestOnSegment(segIndex, latlng) {
 }
 
 function showGhost(segIndex, latlng) {
-  if (ghostDragging || dragging || segments[segIndex].loading) return;
+  if (cutting || ghostDragging || dragging || segments[segIndex].loading) return;
   const g = nearestOnSegment(segIndex, latlng);
   const pt = map.latLngToLayerPoint(g.latlng);
   // Leave room to grab the existing waypoints.
@@ -691,93 +714,394 @@ ghost.on('dragend', (e) => {
   endLive(e.target.getLatLng(), false);
 });
 
-function renderStats() {
-  const coords = routeCoords();
-  if (coords.length < 2) { $('stats').innerHTML = ''; return; }
+// ---------- Routes: list, view mode and edit mode ----------
+const viewLayer = L.layerGroup().addTo(map);
+
+function newRoute(data = {}) {
+  const r = {
+    id: ++routeSeq, name: `Route ${routeSeq}`, color: TRACK_COLORS[(routeSeq - 1) % TRACK_COLORS.length],
+    visible: true, wps: [], segs: [], wpts: [], ...data,
+  };
+  return r;
+}
+
+const serializeRoute = (r) => ({
+  id: r.id, name: r.name, color: r.color, visible: r.visible, wpts: r.wpts,
+  wps: r.id === editingId ? waypoints : r.wps,
+  segs: (r.id === editingId ? segments : r.segs).map((s) => ({ coords: s.coords, loading: s.loading })),
+});
+
+function deserializeRoute(d) {
+  routeSeq = Math.max(routeSeq, d.id);
+  return { ...d, wpts: d.wpts || [], segs: buildSegs(d.wps, d.segs) };
+}
+
+let saveFailed = false;
+function saveRoutes() {
+  try {
+    localStorage.setItem('routes', JSON.stringify({ routes: routes.map(serializeRoute), editingId, selectedId }));
+    saveFailed = false;
+  } catch (e) {
+    console.warn('Routes niet opgeslagen', e);
+    if (!saveFailed) toast('Routes konden niet bewaard worden in de browser (te groot?)', 5000);
+    saveFailed = true;
+  }
+}
+
+// Read-only drawing of all visible routes except the one being edited.
+function renderViews() {
+  viewLayer.clearLayers();
+  routes.forEach((r) => {
+    if (!r.visible || r.id === editingId) return;
+    const coords = coordsOf(r);
+    if (coords.length > 1) {
+      L.polyline(coords, { color: r.color, weight: r.id === selectedId ? 6 : 4, opacity: 0.85 })
+        .bindTooltip(escapeHtml(r.name), { sticky: true })
+        .on('click', (e) => { L.DomEvent.stop(e); selectRoute(r.id); })
+        .on('dblclick', (e) => { L.DomEvent.stop(e); startEdit(r.id); })
+        .addTo(viewLayer);
+    }
+    r.wpts.forEach((w) => L.circleMarker(w.p, { radius: 5, color: r.color, fillOpacity: 1 })
+      .bindTooltip(escapeHtml(w.name || 'Punt')).addTo(viewLayer));
+  });
+}
+
+function statsHtml(coords) {
   const s = computeStats(coords, SPEEDS[$('profile').value]);
-  $('stats').innerHTML = `
-    <div><b>${fmtKm(s.dist)}</b><span>afstand</span></div>
+  return `<div><b>${fmtKm(s.dist)}</b><span>afstand</span></div>
     <div><b>${fmtTime(s.hours)}</b><span>duur</span></div>
     <div><b>↗ ${Math.round(s.up)} m</b><span>↘ ${Math.round(s.down)} m</span></div>`;
 }
 
-function saveRoute() {
-  try {
-    localStorage.setItem('route', JSON.stringify({
-      name: $('routeName').value,
-      wps: waypoints,
-      segs: segments.map((s) => ({ coords: s.coords, loading: s.loading })),
-    }));
-  } catch (e) { console.warn('Route niet opgeslagen', e); }
+function metaText(coords) {
+  if (coords.length < 2) return 'Nog geen punten';
+  const s = computeStats(coords, SPEEDS[$('profile').value]);
+  return `${fmtKm(s.dist)} · ${fmtTime(s.hours)} · ↗ ${Math.round(s.up)} m · ↘ ${Math.round(s.down)} m`;
+}
+
+function renderRouteList() {
+  $('routesEmpty').classList.toggle('hidden', routes.length > 0);
+  $('routeList').innerHTML = routes.map((r) => {
+    const coords = coordsOf(r);
+    if (r.id === editingId) {
+      const others = routes.filter((o) => o.id !== r.id && coordsOf(o).length > 1);
+      return `
+      <li data-id="${r.id}" style="--c:${r.color}" class="editing">
+        <input class="name-input" data-act="rename" value="${escapeHtml(r.name)}" aria-label="Naam van de route" />
+        <div class="stats">${coords.length > 1 ? statsHtml(coords) : ''}</div>
+        <div class="row wrap">
+          <button class="small primary" data-act="done" title="Klaar met bewerken (Esc)">✔ Klaar</button>
+          <button class="small" data-act="undo" title="Ongedaan maken (Ctrl+Z)">↶ Ongedaan</button>
+          <button class="small" data-act="reverse" ${waypoints.length < 2 ? 'disabled' : ''}>⇄ Omkeren</button>
+          <button class="small${cutting ? ' active' : ''}" data-act="cut" ${coords.length < 3 ? 'disabled' : ''}>${cutting ? '✂ Annuleer' : '✂ Knippen'}</button>
+          <select class="small" data-act="join" ${others.length ? '' : 'disabled'} title="Voeg een andere route achteraan toe">
+            <option value="">➕ Route toevoegen…</option>
+            ${others.map((o) => `<option value="${o.id}">${escapeHtml(o.name)}</option>`).join('')}
+          </select>
+          <button class="small" data-act="download" ${coords.length < 2 ? 'disabled' : ''} title="Download als GPX">⬇ GPX</button>
+          <button class="small" data-act="remove" title="Route verwijderen">🗑</button>
+        </div>
+        <p class="hint">${cutting
+          ? 'Klik op de route waar je wilt knippen.'
+          : 'Klik op de kaart om punten toe te voegen. Sleep een punt om het te verplaatsen, sleep de lijn om een tussenpunt toe te voegen, rechtsklik of dubbelklik op een punt om het te verwijderen.'}</p>
+      </li>`;
+    }
+    return `
+      <li data-id="${r.id}" style="--c:${r.color}" class="${r.id === selectedId ? 'selected' : ''}${r.visible ? '' : ' dimmed'}">
+        <div class="name" data-act="select" title="Toon op de kaart">${escapeHtml(r.name)}</div>
+        <div class="meta">${metaText(coords)}</div>
+        <div class="row wrap">
+          <button class="small" data-act="edit">✏️ Bewerken</button>
+          <button class="small" data-act="toggle">${r.visible ? '🙈 Verberg' : '👁 Toon'}</button>
+          <button class="small" data-act="download" ${coords.length < 2 ? 'disabled' : ''} title="Download als GPX">⬇ GPX</button>
+          <button class="small" data-act="remove" title="Route verwijderen">🗑</button>
+        </div>
+      </li>`;
+  }).join('');
+}
+
+// Lighter update while editing: only the stats of the edited route (keeps focus in the name field).
+function updateEditingInfo() {
+  const li = $('routeList').querySelector('li.editing');
+  if (!li) return renderRouteList();
+  const coords = routeCoords();
+  li.querySelector('.stats').innerHTML = coords.length > 1 ? statsHtml(coords) : '';
+  const set = (act, disabled) => { const b = li.querySelector(`[data-act="${act}"]`); if (b) b.disabled = disabled; };
+  set('reverse', waypoints.length < 2);
+  set('cut', coords.length < 3);
+  set('download', coords.length < 2);
 }
 
 function changed() {
+  const r = editingRoute();
+  if (r) { r.wps = waypoints; r.segs = segments; }
   renderRoute();
-  renderStats();
+  renderViews();
+  if (r) updateEditingInfo(); else renderRouteList();
   renderElevation();
-  saveRoute();
+  saveRoutes();
 }
 
-// ---------- Route UI ----------
-function setDrawing(on) {
-  drawing = on;
-  $('drawToggle').classList.toggle('active', on);
-  $('drawToggle').textContent = on ? '✋ Stop met tekenen' : '✏️ Route tekenen';
-  $('map').classList.toggle('drawing', on);
-  on ? map.doubleClickZoom.disable() : map.doubleClickZoom.enable();
+function fitRoute(r) {
+  const coords = coordsOf(r);
+  if (coords.length > 1) map.fitBounds(L.latLngBounds(coords.map((c) => [c[0], c[1]])), { padding: [30, 30] });
+  else if (coords.length === 1) map.panTo([coords[0][0], coords[0][1]]);
+  else if (r.wps.length) map.panTo(r.wps[0]);
 }
 
-$('drawToggle').addEventListener('click', () => { if (!drawing) cancelSplit(); setDrawing(!drawing); });
-map.on('click', (e) => {
-  if (splitting) return splitTrack(splitting.t, e.latlng);
-  if (drawing) addWaypoint(e.latlng);
-});
+function selectRoute(id, fit = true) {
+  const r = routeById(id);
+  if (!r) return;
+  if (!r.visible) r.visible = true;
+  selectedId = id;
+  elevClosedFor = null;
+  if (fit) fitRoute(r);
+  renderViews();
+  renderRouteList();
+  renderElevation();
+  saveRoutes();
+}
 
-$('undo').addEventListener('click', undo);
-function undo() {
-  if (!undoStack.length) return toast('Niets om ongedaan te maken');
-  restore(undoStack.pop());
+function startEdit(id) {
+  const r = routeById(id);
+  if (!r || id === editingId) return;
+  stopEdit();
+  editingId = id;
+  selectedId = id;
+  elevClosedFor = null;
+  r.visible = true;
+  waypoints = r.wps;
+  segments = r.segs;
+  undoStack = [];
+  $('map').classList.add('editing');
+  map.doubleClickZoom.disable();
+  renderRouteList();
   changed();
 }
-document.addEventListener('keydown', (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !['INPUT', 'SELECT'].includes(document.activeElement.tagName)) {
-    e.preventDefault();
-    undo();
+
+function stopEdit() {
+  const r = editingRoute();
+  if (!r) return;
+  setCutting(false);
+  hideGhost();
+  r.wps = waypoints;
+  r.segs = segments;
+  editingId = null;
+  waypoints = [];
+  segments = [];
+  undoStack = [];
+  $('map').classList.remove('editing');
+  map.doubleClickZoom.enable();
+  // A route without any points is not worth keeping.
+  if (!r.wps.length) {
+    routes.splice(routes.indexOf(r), 1);
+    if (selectedId === r.id) selectedId = null;
   }
-  if (e.key === 'Escape') { setDrawing(false); cancelSplit(); }
+  renderRoute();
+  renderRouteList();
+  changed();
+}
+
+function createRoute() {
+  const r = newRoute();
+  routes.unshift(r);
+  startEdit(r.id);
+  toast('Klik op de kaart om punten toe te voegen');
+  return r;
+}
+
+function removeRoute(r) {
+  if (coordsOf(r).length > 1 && !confirm(`Route "${r.name}" verwijderen?`)) return;
+  if (r.id === editingId) {
+    setCutting(false);
+    editingId = null;
+    waypoints = [];
+    segments = [];
+    undoStack = [];
+    $('map').classList.remove('editing');
+    map.doubleClickZoom.enable();
+  }
+  routes.splice(routes.indexOf(r), 1);
+  if (selectedId === r.id) selectedId = null;
+  renderRouteList();
+  changed();
+}
+
+function downloadRoute(r) {
+  const coords = coordsOf(r);
+  if (coords.length < 2) return toast('Deze route heeft nog geen lijn');
+  downloadGpx(r.name || 'route', [coords], r.wpts);
+}
+
+// ---------- Cutting the edited route in two ----------
+const cutMarker = L.circleMarker([0, 0], { radius: 7, color: '#fff', weight: 2, fillColor: '#c4200f', fillOpacity: 1, interactive: false });
+
+function setCutting(on) {
+  cutting = on;
+  $('map').classList.toggle('cutting', on);
+  if (!on) map.removeLayer(cutMarker);
+  else hideGhost();
+  const li = $('routeList').querySelector('li.editing');
+  if (li) renderRouteList();
+}
+
+function showCutMarker(segIndex, latlng) {
+  cutMarker.setLatLng(nearestOnSegment(segIndex, latlng).latlng).addTo(map);
+}
+
+// g: point on the route from nearestOnSegment(). Cutting at (or right next to) a waypoint cuts there;
+// elsewhere a new waypoint is made at the cut point, which ends the first part and starts the second.
+function cutRoute(g) {
+  const r = editingRoute();
+  const pt = map.latLngToLayerPoint(g.latlng);
+  const near = waypoints.findIndex((w) => map.latLngToLayerPoint(w).distanceTo(pt) < 8);
+  let wpsA, segsA, wpsB, segsB;
+  if (near >= 0) {
+    if (near === 0 || near === waypoints.length - 1) return toast('Knip ergens tussen begin en einde van de route');
+    wpsA = waypoints.slice(0, near + 1); segsA = segments.slice(0, near);
+    wpsB = waypoints.slice(near); segsB = segments.slice(near);
+  } else {
+    const s = segments[g.seg];
+    const wp = { lat: g.latlng.lat, lng: g.latlng.lng };
+    const p = [wp.lat, wp.lng];
+    wpsA = [...waypoints.slice(0, g.seg + 1), wp];
+    segsA = [...segments.slice(0, g.seg), { a: waypoints[g.seg], b: wp, coords: [...s.coords.slice(0, g.k + 1), p], loading: false }];
+    wpsB = [wp, ...waypoints.slice(g.seg + 1)];
+    segsB = [{ a: wp, b: waypoints[g.seg + 1], coords: [p, ...s.coords.slice(g.k + 1)], loading: false }, ...segments.slice(g.seg + 1)];
+  }
+  // Named points go with the part they are nearest to.
+  const cutIndex = joinSegs(segsA).length - 1;
+  const all = routeCoords();
+  const wptsA = [], wptsB = [];
+  r.wpts.forEach((w) => {
+    let best = 0, bd = Infinity;
+    all.forEach((c, i) => { const d = haversine(c, w.p); if (d < bd) { bd = d; best = i; } });
+    (best <= cutIndex ? wptsA : wptsB).push(w);
+  });
+
+  setCutting(false);
+  const baseName = r.name;
+  waypoints = wpsA; segments = segsA;
+  r.name = `${baseName} (1)`;
+  r.wpts = wptsA;
+  const b = newRoute({ name: `${baseName} (2)`, wps: wpsB, segs: segsB, wpts: wptsB });
+  routes.splice(routes.indexOf(r) + 1, 0, b);
+  stopEdit();
+  selectRoute(r.id, false);
+  toast('Route geknipt in 2 delen');
+}
+
+// ---------- Joining another route onto the end of the edited one ----------
+// The other route is reversed when its end is closer to our end than its start; the gap in between
+// is routed (or bridged straight in straight-line mode). Undo brings the other route back.
+function joinRoute(other) {
+  if (!other || other.id === editingId) return;
+  let wps = other.wps.map((w) => ({ ...w }));
+  let segs = other.segs.map((s) => ({ coords: s.coords, loading: false }));
+  const tail = waypoints.at(-1);
+  if (tail && wps.length > 1) {
+    const d = (w) => haversine([tail.lat, tail.lng], [w.lat, w.lng]);
+    if (d(wps.at(-1)) < d(wps[0])) {
+      wps = wps.reverse();
+      segs = segs.reverse().map((s) => ({ coords: [...s.coords].reverse(), loading: false }));
+    }
+  }
+  snapshot({ restoreRoute: other });
+  const joined = buildSegs(wps, segs);
+  if (tail) {
+    const gap = haversine([tail.lat, tail.lng], [wps[0].lat, wps[0].lng]);
+    if (gap < 1) wps.shift();
+    else segments.push(newSeg(tail, wps[0]));
+  }
+  waypoints.push(...wps);
+  segments.push(...joined);
+  // Re-link segment endpoints to the actual waypoint objects.
+  segments.forEach((s, i) => { s.a = waypoints[i]; s.b = waypoints[i + 1]; });
+  const r = editingRoute();
+  r.wpts = [...r.wpts, ...other.wpts];
+  routes.splice(routes.indexOf(other), 1);
+  if (selectedId === other.id) selectedId = editingId;
+  renderRouteList();
+  changed();
+  toast(`"${other.name}" toegevoegd`);
+}
+
+// ---------- Route list events ----------
+$('newRoute').addEventListener('click', createRoute);
+
+$('routeList').addEventListener('click', (e) => {
+  const el = e.target.closest('[data-act]');
+  const li = e.target.closest('li[data-id]');
+  if (!el || !li || el.tagName === 'SELECT' || el.tagName === 'INPUT') return;
+  const r = routeById(+li.dataset.id);
+  if (!r) return;
+  switch (el.dataset.act) {
+    case 'select': selectRoute(r.id); break;
+    case 'edit': startEdit(r.id); fitRoute(r); break;
+    case 'done': stopEdit(); break;
+    case 'toggle': r.visible = !r.visible; renderViews(); renderRouteList(); saveRoutes(); break;
+    case 'download': downloadRoute(r); break;
+    case 'remove': removeRoute(r); break;
+    case 'undo': undo(); break;
+    case 'reverse': reverseRoute(); break;
+    case 'cut': setCutting(!cutting); if (cutting) toast('Klik op de route waar je wilt knippen (Esc om te annuleren)', 4000); break;
+    default:
+  }
 });
 
-$('reverse').addEventListener('click', () => {
+$('routeList').addEventListener('change', (e) => {
+  if (e.target.dataset.act === 'join' && e.target.value) joinRoute(routeById(+e.target.value));
+});
+
+$('routeList').addEventListener('input', (e) => {
+  if (e.target.dataset.act !== 'rename') return;
+  const r = editingRoute();
+  if (!r) return;
+  r.name = e.target.value;
+  renderElevation();
+  saveRoutes();
+});
+
+map.on('click', (e) => {
+  if (cutting) return;
+  if (editingId) addWaypoint(e.latlng);
+});
+
+function undo() {
+  if (!editingId) return;
+  if (!undoStack.length) return toast('Niets om ongedaan te maken');
+  restore(undoStack.pop());
+  renderRouteList();
+  changed();
+}
+
+function reverseRoute() {
   if (waypoints.length < 2) return;
   snapshot();
   waypoints.reverse();
   segments = segments.reverse().map((s) => ({ a: s.b, b: s.a, coords: [...s.coords].reverse(), loading: s.loading }));
   changed();
-});
+}
 
-$('clear').addEventListener('click', () => {
-  if (!waypoints.length) return;
-  snapshot();
-  waypoints = [];
-  segments = [];
-  changed();
+document.addEventListener('keydown', (e) => {
+  const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName);
+  if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !typing) {
+    e.preventDefault();
+    undo();
+  }
+  if (e.key === 'Escape' && !typing) {
+    if (cutting) setCutting(false);
+    else stopEdit();
+  }
 });
 
 $('profile').addEventListener('change', () => {
-  renderStats();
-  if (waypoints.length > 1 && !$('straight').checked && confirm('Hele route opnieuw berekenen met dit profiel?')) {
+  renderRouteList();
+  if (waypoints.length > 1 && !$('straight').checked && confirm('Route opnieuw berekenen met dit profiel?')) {
     snapshot();
     segments = segments.map((s, i) => newSeg(waypoints[i], waypoints[i + 1]));
     changed();
   }
-});
-
-$('routeName').addEventListener('input', saveRoute);
-
-$('export').addEventListener('click', () => {
-  const coords = routeCoords();
-  if (coords.length < 2) return toast('Teken eerst een route');
-  downloadGpx($('routeName').value || 'route', [coords]);
 });
 
 // lines: one or more track segments [[lat, lng, ele?], ...]; wpts: [{ p: [lat, lng, ele?], name }].
@@ -802,9 +1126,6 @@ ${segs}
 }
 
 // ---------- GPX import ----------
-const tracks = [];
-let trackSeq = 0;
-
 function parseGpx(text, fileName) {
   const doc = new DOMParser().parseFromString(text, 'application/xml');
   if (doc.getElementsByTagName('parsererror').length) throw new Error('Ongeldig GPX-bestand');
@@ -826,209 +1147,16 @@ function parseGpx(text, fileName) {
     .find(Boolean);
 
   const valid = lines.filter((l) => l.length > 1);
-  if (!valid.length && !wpts.length) throw new Error('Geen track of punten gevonden');
+  if (!valid.length) throw new Error('Geen track of route gevonden');
   return { name: nameEl?.textContent.trim() || fileName.replace(/\.gpx$/i, ''), lines: valid, wpts };
 }
 
-function addTrack(data, index = tracks.length) {
-  const color = TRACK_COLORS[trackSeq % TRACK_COLORS.length];
-  const t = { id: ++trackSeq, color, visible: true, pick: false, ...data };
-  t.layer = L.featureGroup();
-  t.lines.forEach((l) => L.polyline(l, { color, weight: 4, opacity: 0.85 })
-    .on('click', () => { if (!splitting) selectTrack(t.id); }).addTo(t.layer));
-  t.wpts.forEach((w) => L.circleMarker(w.p, { radius: 5, color, fillOpacity: 1 })
-    .bindTooltip(escapeHtml(w.name || 'Punt')).addTo(t.layer));
-  t.layer.addTo(map);
-  t.coords = t.lines.flat();
-  t.stats = computeStats(t.coords);
-  tracks.splice(index, 0, t);
-  renderTrackList();
-  return t;
-}
-
-function removeTrack(t) {
-  map.removeLayer(t.layer);
-  tracks.splice(tracks.indexOf(t), 1);
-  if (profileSource === t.id) profileSource = 'route';
-}
-
-async function loadFiles(files) {
-  let last = null;
-  for (const file of files) {
-    try {
-      last = addTrack(parseGpx(await file.text(), file.name));
-    } catch (err) {
-      toast(`${file.name}: ${err.message}`, 5000);
-    }
-  }
-  if (last) selectTrack(last.id);
-}
-
-function renderTrackList() {
-  $('trackList').innerHTML = tracks.map((t) => `
-    <li data-id="${t.id}" style="--c:${t.color}" class="${profileSource === t.id ? 'selected' : ''}">
-      <div class="head">
-        ${tracks.length > 1 && t.lines.length ? `<input type="checkbox" data-act="pick" title="Selecteer om samen te voegen" ${t.pick ? 'checked' : ''} />` : ''}
-        <div class="name" data-act="select">${escapeHtml(t.name)}</div>
-      </div>
-      <div class="meta">${fmtKm(t.stats.dist)} · ↗ ${Math.round(t.stats.up)} m · ↘ ${Math.round(t.stats.down)} m</div>
-      <div class="row wrap">
-        <button class="small" data-act="toggle">${t.visible ? '🙈 Verberg' : '👁 Toon'}</button>
-        <button class="small" data-act="edit" ${t.coords.length < 2 ? 'disabled' : ''}>✏️ Bewerk als route</button>
-        <button class="small${splitting?.t === t ? ' active' : ''}" data-act="split" ${t.coords.length < 3 ? 'disabled' : ''}>${splitting?.t === t ? '✂ Annuleer' : '✂ Splitsen'}</button>
-        <button class="small" data-act="download" title="Download als GPX">⬇ GPX</button>
-        <button class="small" data-act="remove" title="Verwijder">🗑</button>
-      </div>
-    </li>`).join('');
-
-  const picked = tracks.filter((t) => t.pick && t.lines.length);
-  $('trackActions').innerHTML = tracks.length > 1
-    ? `<button class="small" data-act="merge" ${picked.length < 2 ? 'disabled' : ''}>🔗 Voeg ${picked.length >= 2 ? picked.length + ' tracks' : 'tracks'} samen</button>
-       <span class="hint">${picked.length < 2 ? 'Vink 2 of meer tracks aan' : 'In de volgorde van de lijst'}</span>`
-    : '';
-}
-
-$('trackActions').addEventListener('click', (e) => {
-  if (e.target.closest('[data-act]')?.dataset.act === 'merge') mergeTracks(tracks.filter((t) => t.pick && t.lines.length));
-});
-
-$('trackList').addEventListener('click', (e) => {
-  const act = e.target.closest('[data-act]')?.dataset.act;
-  const li = e.target.closest('li');
-  if (!act || !li) return;
-  const t = tracks.find((x) => x.id === +li.dataset.id);
-  if (act === 'select') selectTrack(t.id);
-  if (act === 'pick') { t.pick = e.target.checked; renderTrackList(); }
-  if (act === 'toggle') {
-    t.visible = !t.visible;
-    t.visible ? t.layer.addTo(map) : map.removeLayer(t.layer);
-    renderTrackList();
-  }
-  if (act === 'remove') {
-    if (splitting?.t === t) cancelSplit();
-    removeTrack(t);
-    renderTrackList();
-    renderElevation();
-  }
-  if (act === 'edit') { if (splitting?.t === t) cancelSplit(); trackToRoute(t); }
-  if (act === 'split') splitting?.t === t ? cancelSplit() : startSplit(t);
-  if (act === 'download') downloadGpx(t.name, t.lines, t.wpts);
-});
-
-// ---------- Splitting and merging tracks ----------
-let splitting = null; // { t, marker }
-
-function nearestTrackPoint(t, latlng) {
-  const cos = Math.cos((latlng.lat * Math.PI) / 180);
-  let best = null;
-  t.lines.forEach((line, li) => line.forEach((p, pi) => {
-    const d = (p[0] - latlng.lat) ** 2 + ((p[1] - latlng.lng) * cos) ** 2;
-    if (!best || d < best.d) best = { d, li, pi };
-  }));
-  return best;
-}
-
-function startSplit(t) {
-  cancelSplit();
-  setDrawing(false);
-  if (!t.visible) { t.visible = true; t.layer.addTo(map); }
-  splitting = {
-    t,
-    marker: L.circleMarker([0, 0], { radius: 7, color: '#fff', weight: 2, fillColor: t.color, fillOpacity: 1, interactive: false }),
-  };
-  $('map').classList.add('splitting');
-  renderTrackList();
-  toast('Klik op de track waar je wilt splitsen (Esc om te annuleren)', 5000);
-}
-
-function cancelSplit() {
-  if (!splitting) return;
-  map.removeLayer(splitting.marker);
-  splitting = null;
-  $('map').classList.remove('splitting');
-  renderTrackList();
-}
-
-map.on('mousemove', (e) => {
-  if (!splitting) return;
-  const n = nearestTrackPoint(splitting.t, e.latlng);
-  splitting.marker.setLatLng(splitting.t.lines[n.li][n.pi]).addTo(map);
-});
-
-// Splits at a track point; the point itself ends the first part and starts the second.
-function splitTrack(t, latlng) {
-  const { li, pi } = nearestTrackPoint(t, latlng);
-  const first = [...t.lines.slice(0, li), t.lines[li].slice(0, pi + 1)].filter((l) => l.length > 1);
-  const second = [t.lines[li].slice(pi), ...t.lines.slice(li + 1)].filter((l) => l.length > 1);
-  if (!first.length || !second.length) return toast('Kies een punt verder van het begin of einde van de track');
-
-  const firstWpts = [];
-  const secondWpts = [];
-  t.wpts.forEach((w) => {
-    const n = nearestTrackPoint(t, L.latLng(w.p[0], w.p[1]));
-    (n.li < li || (n.li === li && n.pi <= pi) ? firstWpts : secondWpts).push(w);
-  });
-
-  cancelSplit();
-  const index = tracks.indexOf(t);
-  removeTrack(t);
-  addTrack({ name: `${t.name} (1)`, lines: first, wpts: firstWpts }, index);
-  addTrack({ name: `${t.name} (2)`, lines: second, wpts: secondWpts }, index + 1);
-  renderElevation();
-  toast('Track gesplitst in 2 delen');
-}
-
-// Joins tracks in the given order, reversing a track when that makes its ends connect better.
-// Segments whose ends are within 50 m are joined into one; larger gaps stay separate segments.
-function mergeTracks(list) {
-  if (list.length < 2) return;
-  const reversed = (lines) => lines.map((l) => [...l].reverse()).reverse();
-  const ends = (lines) => [lines[0][0], lines.at(-1).at(-1)];
-  let lines = [];
-  const wpts = [];
-  list.forEach((t, k) => {
-    let tl = t.lines.map((l) => [...l]);
-    const [start, end] = ends(tl);
-    if (k === 0) {
-      const [ns, ne] = ends(list[1].lines);
-      const fromStart = Math.min(haversine(start, ns), haversine(start, ne));
-      const fromEnd = Math.min(haversine(end, ns), haversine(end, ne));
-      if (fromStart < fromEnd) tl = reversed(tl);
-    } else {
-      const tail = lines.at(-1).at(-1);
-      if (haversine(tail, end) < haversine(tail, start)) tl = reversed(tl);
-      if (haversine(tail, tl[0][0]) < 50) {
-        lines[lines.length - 1] = lines.at(-1).concat(tl[0].slice(1));
-        tl = tl.slice(1);
-      }
-    }
-    lines = lines.concat(tl);
-    wpts.push(...t.wpts);
-  });
-
-  const index = tracks.indexOf(list[0]);
-  if (splitting && list.includes(splitting.t)) cancelSplit();
-  list.forEach(removeTrack);
-  const merged = addTrack({ name: list.map((t) => t.name).join(' + '), lines, wpts }, index);
-  selectTrack(merged.id);
-  toast(`${list.length} tracks samengevoegd`);
-}
-
-function selectTrack(id) {
-  const t = tracks.find((x) => x.id === id);
-  if (!t) return;
-  if (!t.visible) { t.visible = true; t.layer.addTo(map); }
-  map.fitBounds(t.layer.getBounds(), { padding: [30, 30] });
-  profileSource = id;
-  renderTrackList();
-  renderElevation();
-}
-
-// Turns an imported track into an editable route: keeps the original geometry but places
-// draggable waypoints at regular intervals so parts of it can be re-routed.
-function trackToRoute(t) {
-  const coords = t.coords;
-  const step = Math.min(5000, Math.max(300, t.stats.dist / 25));
+// An imported track keeps its exact geometry; waypoints are placed at regular intervals along it so
+// parts of it can be re-routed by dragging them in edit mode.
+function routeFromTrack({ name, lines, wpts }) {
+  const coords = lines.flat();
+  const dist = computeStats(coords).dist;
+  const step = Math.min(5000, Math.max(300, dist / 25));
   const idx = [0];
   let acc = 0;
   for (let i = 1; i < coords.length - 1; i++) {
@@ -1036,23 +1164,30 @@ function trackToRoute(t) {
     if (acc >= step) { idx.push(i); acc = 0; }
   }
   idx.push(coords.length - 1);
-
-  snapshot();
-  waypoints = idx.map((i) => ({ lat: coords[i][0], lng: coords[i][1] }));
-  segments = idx.slice(0, -1).map((start, k) => ({
-    a: waypoints[k], b: waypoints[k + 1], coords: coords.slice(start, idx[k + 1] + 1), loading: false,
+  const wps = idx.map((i) => ({ lat: coords[i][0], lng: coords[i][1] }));
+  const segs = idx.slice(0, -1).map((start, k) => ({
+    a: wps[k], b: wps[k + 1], coords: coords.slice(start, idx[k + 1] + 1), loading: false,
   }));
-  $('routeName').value = t.name;
-  t.visible = false;
-  map.removeLayer(t.layer);
-  profileSource = 'route';
-  renderTrackList();
-  changed();
-  map.fitBounds(L.latLngBounds(coords.map((c) => [c[0], c[1]])), { padding: [30, 30] });
-  toast('Track omgezet naar bewerkbare route');
+  return newRoute({ name, wps, segs, wpts });
 }
 
-$('gpxInput').addEventListener('change', (e) => { loadFiles(e.target.files); e.target.value = ''; });
+async function loadFiles(files) {
+  let last = null;
+  for (const file of files) {
+    try {
+      last = routeFromTrack(parseGpx(await file.text(), file.name));
+      routes.unshift(last);
+    } catch (err) {
+      toast(`${file.name}: ${err.message}`, 5000);
+    }
+  }
+  if (last) {
+    toast(files.length > 1 ? 'GPX-bestanden geïmporteerd' : `"${last.name}" geïmporteerd – klik ✏️ Bewerken om aan te passen`, 4000);
+    selectRoute(last.id);
+  }
+}
+
+$('gpxInput').addEventListener('change', (e) => { loadFiles(Array.from(e.target.files)); e.target.value = ''; });
 
 let dragDepth = 0;
 document.addEventListener('dragenter', (e) => { e.preventDefault(); dragDepth++; document.body.classList.add('dragging'); });
@@ -1067,17 +1202,18 @@ document.addEventListener('drop', (e) => {
 });
 
 // ---------- Elevation profile ----------
-let profileSource = 'route';
+// Shows the profile of the selected route; closing it hides it until another route is selected.
+let elevClosedFor = null;
 let elevData = null;
 const hoverMarker = L.circleMarker([0, 0], { radius: 7, color: '#fff', weight: 2, fillColor: '#e2621b', fillOpacity: 1 });
 
-$('elevClose').addEventListener('click', () => { profileSource = null; renderElevation(); renderTrackList(); });
+$('elevClose').addEventListener('click', () => { elevClosedFor = selectedId; renderElevation(); });
 
 function renderElevation() {
   const panel = $('elevation');
-  let coords, title;
-  if (profileSource === 'route') { coords = routeCoords(); title = $('routeName').value || 'Route'; }
-  else { const t = tracks.find((x) => x.id === profileSource); coords = t?.coords; title = t?.name; }
+  const r = routeById(selectedId);
+  const coords = r && elevClosedFor !== r.id ? coordsOf(r) : null;
+  const title = r?.name || 'Route';
 
   if (!coords || coords.length < 2 || !coords.some((c) => c[2] != null && !isNaN(c[2]))) {
     panel.classList.add('hidden');
@@ -1163,13 +1299,23 @@ $('elevCanvas').addEventListener('mousemove', (e) => {
 $('elevCanvas').addEventListener('mouseleave', () => { drawElevation(); map.removeLayer(hoverMarker); });
 window.addEventListener('resize', () => drawElevation());
 
-// ---------- Restore saved route ----------
+// ---------- Restore saved routes ----------
 try {
-  const saved = JSON.parse(localStorage.getItem('route') || 'null');
-  if (saved && saved.wps?.length) {
-    $('routeName').value = saved.name || 'Mijn route';
-    restore(JSON.stringify(saved));
-    changed();
-    if (waypoints.length > 1) map.fitBounds(L.latLngBounds(routeCoords().map((c) => [c[0], c[1]])), { padding: [30, 30] });
+  const saved = JSON.parse(localStorage.getItem('routes') || 'null');
+  if (saved) {
+    saved.routes.forEach((d) => routes.push(deserializeRoute(d)));
+    selectedId = routeById(saved.selectedId) ? saved.selectedId : null;
+  } else {
+    // Migrate the single route stored by earlier versions.
+    const old = JSON.parse(localStorage.getItem('route') || 'null');
+    if (old && old.wps?.length) routes.push(deserializeRoute({ id: 1, name: old.name || 'Mijn route', color: TRACK_COLORS[0], visible: true, wps: old.wps, segs: old.segs }));
+    localStorage.removeItem('route');
   }
-} catch (e) { console.warn('Opgeslagen route kon niet geladen worden', e); }
+  if (saved?.editingId && routeById(saved.editingId)) startEdit(saved.editingId);
+  else changed();
+  const focus = routeById(editingId || selectedId);
+  if (focus) fitRoute(focus);
+} catch (e) {
+  console.warn('Opgeslagen routes konden niet geladen worden', e);
+  changed();
+}

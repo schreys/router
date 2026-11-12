@@ -5,12 +5,14 @@ A small static web app for viewing and planning bike routes on OpenCycleMap.
 ## Features
 
 - **Map layers**: OpenCycleMap, Outdoors and Landscape (Thunderforest, need an API key), CyclOSM, OpenStreetMap, plus an overlay with cycle node networks/routes (Waymarked Trails).
-- **Place search** on the map: cities, villages and boroughs (Belgium, the Netherlands, Luxembourg, northern France; also under their Dutch names, e.g. Luik, Rijsel) appear instantly from a local list built from [GeoNames](https://www.geonames.org) (CC BY 4.0) during the Docker build (`PLACES_COUNTRIES` build arg, [deploy/build-places.sh](deploy/build-places.sh)). Streets, addresses and POIs come from [Photon](https://photon.komoot.io), falling back to [Nominatim](https://nominatim.openstreetmap.org) when Photon is unavailable. A found place can be added to the route.
-- **Route planning**: click "Route tekenen" and click points on the map. The route follows roads via [BRouter](https://brouter.de) (profiles: touring bike, road bike, safe, MTB, shortest, hiking) or straight lines.
-- **Route editing**: drag points (the route is re-calculated live while dragging), drag the line (or click it) to insert a point there, right-click or double-click a point to delete it, undo (Ctrl/Cmd+Z), reverse.
-- **GPX**: load multiple GPX files (button or drag-and-drop), show/hide them, and convert one to an editable route with "Bewerk als route". **Split** a track by clicking the point on the map ("✂ Splitsen"), **merge** tracks by ticking them and clicking "🔗 Voeg samen" (joined in list order, reversed where needed so the ends connect), and download any track as GPX. Export the current route as GPX.
+- **Place search** on the map: cities, villages and boroughs (Belgium, the Netherlands, Luxembourg, northern France; also under their Dutch names, e.g. Luik, Rijsel) appear instantly from a local list built from [GeoNames](https://www.geonames.org) (CC BY 4.0) during the Docker build (`PLACES_COUNTRIES` build arg, [deploy/build-places.sh](deploy/build-places.sh)). Streets, addresses and POIs come from [Photon](https://photon.komoot.io), falling back to [Nominatim](https://nominatim.openstreetmap.org) when Photon is unavailable. A found place can be added to the route being edited, or start a new route.
+- **Routes**: one list for everything – routes you draw and GPX files you import are the same kind of route. Each route can be shown/hidden, selected (zooms to it and shows its elevation profile), downloaded as GPX and deleted.
+- **View and edit mode**: one route at a time is in edit mode ("✏️ Bewerken", or double-click it on the map; "✔ Klaar" or Esc to stop); all others are read-only. "➕ Nieuwe route" creates a route and starts editing it.
+- **Editing**: click the map to add points; the route follows roads via [BRouter](https://brouter.de) (profiles: touring bike, road bike, safe, MTB, shortest, hiking) or straight lines. Drag points (re-calculated live while dragging), drag the line (or click it) to insert a point, right-click or double-click a point to delete it, undo (Ctrl/Cmd+Z), reverse, rename.
+- **Cut and join**: "✂ Knippen" cuts the edited route in two at the point you click; "➕ Route toevoegen…" appends another route to the end (reversed if needed so the ends connect, the gap in between is routed). Both can be undone.
+- **GPX import**: load GPX files with the "📂 GPX" button or by dropping them on the map. The original track geometry is kept; editing points are placed along it at regular intervals.
 - **Stats & elevation profile**: distance, estimated time, ascent/descent. Hovering over the profile shows the position on the map.
-- The current route and the API key are stored in the browser (localStorage).
+- All routes and the API key are stored in the browser (localStorage).
 
 ## Running it
 

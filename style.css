@@ -49,7 +49,7 @@ button.primary { background: #5a9e2f; border-color: #4a8a24; color: #fff; }
 button.primary:hover { background: #4a8a24; }
 button.active { background: #e2621b; border-color: #c4500f; color: #fff; }
 button.small { padding: 2px 6px; font-size: 12px; }
-#drawToggle { width: 100%; }
+button:disabled { opacity: .45; cursor: default; }
 
 .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 10px 0; }
 .stats div { background: #fff; border: 1px solid #e5e5e0; border-radius: 6px; padding: 6px; text-align: center; }
@@ -57,19 +57,8 @@ button.small { padding: 2px 6px; font-size: 12px; }
 .stats span { font-size: 11px; color: #777; }
 .hint { color: #777; font-size: 12px; line-height: 1.4; margin: 6px 0 0; }
 
-.dropzone {
-  display: block;
-  border: 2px dashed #bbb;
-  border-radius: 8px;
-  padding: 16px;
-  text-align: center;
-  color: #666;
-  cursor: pointer;
-}
-.dropzone.over, body.dragging .dropzone { border-color: #5a9e2f; background: #eef6e8; }
-
-.track-list { list-style: none; padding: 0; margin: 10px 0 0; }
-.track-list li {
+.route-list { list-style: none; padding: 0; margin: 10px 0 0; }
+.route-list li {
   background: #fff;
   border: 1px solid #e5e5e0;
   border-left: 5px solid var(--c);
@@ -77,18 +66,24 @@ button.small { padding: 2px 6px; font-size: 12px; }
   padding: 6px 8px;
   margin-bottom: 6px;
 }
-.track-list li.selected { box-shadow: 0 0 0 2px var(--c); }
-.track-list .name { font-weight: 600; cursor: pointer; word-break: break-word; }
-.track-list .head { display: flex; gap: 6px; align-items: flex-start; }
-.track-list .head input { margin: 3px 0 0; }
-.track-list .meta { color: #777; font-size: 12px; margin: 2px 0 4px; }
-.track-actions { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
-.track-actions:empty { display: none; }
-.track-actions .hint { margin: 0; }
+.route-list li.selected { box-shadow: 0 0 0 2px var(--c); }
+.route-list li.dimmed .name, .route-list li.dimmed .meta { opacity: .5; }
+.route-list li.editing { border-left-color: #e2621b; box-shadow: 0 0 0 2px #e2621b; background: #fffaf6; }
+.route-list .name { font-weight: 600; cursor: pointer; word-break: break-word; }
+.route-list .meta { color: #777; font-size: 12px; margin: 2px 0 4px; }
+.route-list .name-input { width: 100%; padding: 5px 7px; border: 1px solid #ccc; border-radius: 6px; font: inherit; font-weight: 600; }
+.route-list .stats:empty { display: none; }
+.route-list select.small { padding: 2px 4px; font-size: 12px; border: 1px solid #bbb; border-radius: 6px; background: #fff; max-width: 100%; }
+.button {
+  display: inline-block; padding: 6px 10px; border: 1px solid #bbb; background: #fff; border-radius: 6px; cursor: pointer; white-space: nowrap;
+}
+.button:hover { background: #f0f0ea; }
+.grow { flex: 1; }
+body.dragging #map { outline: 4px dashed #5a9e2f; outline-offset: -4px; }
 
 main { flex: 1; position: relative; }
 #map { position: absolute; inset: 0; }
-#map.drawing, #map.splitting { cursor: crosshair; }
+#map.editing, #map.cutting { cursor: crosshair; }
 
 #elevation {
   position: absolute;

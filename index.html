@@ -26,10 +26,17 @@
     </section>
 
     <section>
-      <h2>Route plannen</h2>
+      <h2>Routes</h2>
       <div class="row">
-        <button id="drawToggle" class="primary">✏️ Route tekenen</button>
+        <button id="newRoute" class="primary grow">➕ Nieuwe route</button>
+        <label class="button" title="GPX-bestanden importeren (of sleep ze op de kaart)">📂 GPX<input id="gpxInput" type="file" accept=".gpx,application/gpx+xml" multiple hidden /></label>
       </div>
+      <ul id="routeList" class="route-list"></ul>
+      <p id="routesEmpty" class="hint">Nog geen routes. Maak een nieuwe route of sleep GPX-bestanden op de kaart.</p>
+    </section>
+
+    <section>
+      <h2>Routing</h2>
       <label class="field">
         Profiel
         <select id="profile">
@@ -43,31 +50,6 @@
       </label>
       <label class="check"><input id="straight" type="checkbox" /> Rechte lijnen (geen routing)</label>
       <p class="hint" id="routerStatus"></p>
-      <label class="field">
-        Naam
-        <input id="routeName" type="text" value="Mijn route" />
-      </label>
-      <div class="row wrap">
-        <button id="undo" title="Ongedaan maken (Ctrl+Z)">↶ Ongedaan</button>
-        <button id="reverse">⇄ Omkeren</button>
-        <button id="clear">🗑 Wissen</button>
-        <button id="export" class="primary">⬇ GPX</button>
-      </div>
-      <div id="stats" class="stats"></div>
-      <p class="hint">
-        Klik op de kaart om punten toe te voegen. Sleep een punt om het te verplaatsen,
-        sleep de lijn (of klik erop) om een tussenpunt in te voegen, rechtsklik (of dubbelklik) op een punt om het te verwijderen.
-      </p>
-    </section>
-
-    <section>
-      <h2>GPX-bestanden</h2>
-      <label id="dropzone" class="dropzone">
-        <input id="gpxInput" type="file" accept=".gpx,application/gpx+xml" multiple hidden />
-        GPX hier neerzetten of <u>bestanden kiezen</u>
-      </label>
-      <div id="trackActions" class="track-actions"></div>
-      <ul id="trackList" class="track-list"></ul>
     </section>
   </aside>
 
